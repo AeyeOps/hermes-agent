@@ -112,6 +112,52 @@ class TestHandleFunctionCall:
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
 
+    def test_pre_tool_hook_receives_coerced_args(self):
+        tool_schema = {
+            "name": "test_tool",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "messageIds": {"type": "array", "items": {"type": "string"}},
+                    "criteria": {
+                        "type": "object",
+                        "properties": {
+                            "hasAttachment": {"type": "boolean"},
+                        },
+                    },
+                },
+            },
+        }
+
+        with (
+            patch("model_tools.registry.get_schema", return_value=tool_schema),
+            patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
+            patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
+        ):
+            result = handle_function_call(
+                "test_tool",
+                {
+                    "messageIds": '["a", "b"]',
+                    "criteria": '{"hasAttachment": "true"}',
+                },
+                task_id="task-1",
+                tool_call_id="call-1",
+                session_id="session-1",
+            )
+
+        assert result == '{"ok":true}'
+        assert mock_invoke_hook.call_args_list[0] == call(
+            "pre_tool_call",
+            tool_name="test_tool",
+            args={
+                "messageIds": ["a", "b"],
+                "criteria": {"hasAttachment": True},
+            },
+            task_id="task-1",
+            session_id="session-1",
+            tool_call_id="call-1",
+        )
+
 
 # =========================================================================
 # Agent loop tools

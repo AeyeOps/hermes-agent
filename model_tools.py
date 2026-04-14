@@ -503,20 +503,19 @@ _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Coerce tool call arguments to match their JSON Schema types.
 
-    LLMs frequently return numbers as strings (``"42"`` instead of ``42``)
-    and booleans as strings (``"true"`` instead of ``true``).  This compares
-    each argument value against the tool's registered JSON Schema and attempts
-    safe coercion when the value is a string but the schema expects a different
-    type.  Original values are preserved when coercion fails.
+    LLMs frequently serialize tool arguments incorrectly:
+    - numbers as strings (``"42"`` instead of ``42``)
+    - booleans as strings (``"true"`` instead of ``true``)
+    - arrays/objects as JSON strings (``"[\"a\"]"`` / ``"{...}"``)
+    - bare scalar values for array-typed fields
 
-    Handles ``"type": "integer"``, ``"type": "number"``, ``"type": "boolean"``,
-    and union types (``"type": ["integer", "string"]``).
-
-    Also wraps bare scalar values in a single-element list when the schema
-    declares ``"type": "array"``.  Open-weight models (DeepSeek, Qwen, GLM)
-    sometimes emit ``{"urls": "https://a.com"}`` when the tool expects
-    ``{"urls": ["https://a.com"]}``; wrapping here avoids a confusing tool
-    failure on what is otherwise a well-formed call.
+    This compares each argument value against the tool's registered JSON Schema
+    and attempts safe coercion before dispatch. Nested arrays/objects are
+    recursively normalized using the schema's ``items`` / ``properties``
+    definitions when available. For array-typed fields, a non-null bare scalar
+    is wrapped in a single-element list after JSON/null coercion has had a
+    chance to run. Original values are preserved when coercion fails or is not
+    applicable.
     """
     if not args or not isinstance(args, dict):
         return args
@@ -533,52 +532,88 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         prop_schema = properties.get(key)
         if not prop_schema:
             continue
-        expected = prop_schema.get("type")
-
-        # Wrap bare non-list values when the schema declares ``array``.
-        # Strings still go through _coerce_value first so JSON-encoded
-        # arrays (``'["a","b"]'``) get parsed and nullable ``"null"``
-        # becomes ``None`` rather than ``["null"]``.
-        # ``None`` itself is preserved — we don't know whether the model
-        # meant "omit" or "empty list", and tools with sensible defaults
-        # (e.g. read_file's normalize_read_pagination) already handle it.
-        if expected == "array" and value is not None and not isinstance(value, (list, tuple)):
-            if isinstance(value, str):
-                coerced = _coerce_value(value, expected, schema=prop_schema)
-                if coerced is not value:
-                    # _coerce_value handled it (JSON-parsed list or
-                    # nullable "null" → None).
-                    args[key] = coerced
-                    continue
-                args[key] = [value]
-                logger.info(
-                    "coerce_tool_args: wrapped bare string in list for %s.%s",
-                    tool_name, key,
-                )
-                continue
-            args[key] = [value]
-            logger.info(
-                "coerce_tool_args: wrapped bare %s in list for %s.%s",
-                type(value).__name__, tool_name, key,
-            )
-            continue
-
-        if not isinstance(value, str):
-            continue
-        if not expected and not _schema_allows_null(prop_schema):
-            continue
-        coerced = _coerce_value(value, expected, schema=prop_schema)
+        coerced = _coerce_by_schema(value, prop_schema, tool_name=tool_name, arg_name=key)
         if coerced is not value:
             args[key] = coerced
 
     return args
 
 
-def _coerce_value(value: str, expected_type, schema: dict | None = None):
+def _coerce_by_schema(
+    value: Any,
+    schema: Dict[str, Any] | None,
+    *,
+    tool_name: str | None = None,
+    arg_name: str | None = None,
+):
+    """Coerce *value* according to a JSON Schema fragment.
+
+    Handles top-level scalar coercion plus recursive normalization for arrays
+    and objects when nested schemas are present. Also preserves AEyeOps' null
+    handling for schemas that permit null via nullable/union forms and upstream's
+    bare-scalar wrapping for array-typed arguments.
+    """
+    if not schema:
+        return value
+
+    expected_type = schema.get("type")
+
+    # Wrap bare non-list values when the schema declares ``array``.
+    # Strings still go through _coerce_value first so JSON-encoded arrays
+    # (``'["a","b"]'``) get parsed and nullable ``"null"`` becomes ``None``
+    # rather than ``["null"]``. ``None`` itself is preserved — we don't know
+    # whether the model meant "omit" or "empty list", and tools with sensible
+    # defaults already handle it.
+    if expected_type == "array" and value is not None and not isinstance(value, (list, tuple)):
+        if isinstance(value, str):
+            coerced = _coerce_value(value, expected_type, schema=schema)
+            if coerced is value:
+                coerced = [value]
+                if tool_name and arg_name:
+                    logger.info(
+                        "coerce_tool_args: wrapped bare string in list for %s.%s",
+                        tool_name,
+                        arg_name,
+                    )
+        else:
+            coerced = [value]
+            if tool_name and arg_name:
+                logger.info(
+                    "coerce_tool_args: wrapped bare %s in list for %s.%s",
+                    type(value).__name__,
+                    tool_name,
+                    arg_name,
+                )
+    else:
+        coerced = _coerce_value(value, expected_type, schema=schema)
+
+    if isinstance(coerced, list):
+        item_schema = schema.get("items")
+        if item_schema:
+            return [_coerce_by_schema(item, item_schema) for item in coerced]
+        return coerced
+
+    if isinstance(coerced, dict):
+        properties = schema.get("properties") or {}
+        additional = schema.get("additionalProperties")
+        normalized = {}
+        for key, item in coerced.items():
+            child_schema = properties.get(key)
+            if child_schema is None and isinstance(additional, dict):
+                child_schema = additional
+            normalized[key] = _coerce_by_schema(item, child_schema) if child_schema else item
+        return normalized
+
+    return coerced
+
+
+def _coerce_value(value: Any, expected_type, schema: dict | None = None):
     """Attempt to coerce a string *value* to *expected_type*.
 
-    Returns the original string when coercion is not applicable or fails.
+    Returns the original value when coercion is not applicable or fails.
     """
+    if not isinstance(value, str):
+        return value
     if _schema_allows_null(schema) and value.strip().lower() == "null":
         return None
 
