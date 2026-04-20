@@ -78,7 +78,9 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
+    GOOGLECHAT = "googlechat"
     YUANBAO = "yuanbao"
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -340,6 +342,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.QQBOT: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("client_secret")
     ),
+    Platform.GOOGLECHAT: lambda cfg: bool(cfg.extra.get("service_account_json")),
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
     ),
@@ -1467,6 +1470,28 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
+    # Google Chat (Workspace via Pub/Sub pull subscription — ADR-007, ADR-008)
+    googlechat_sa_json = os.getenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON")
+    googlechat_pubsub_project = os.getenv("GOOGLECHAT_PUBSUB_PROJECT")
+    googlechat_pubsub_subscription = os.getenv("GOOGLECHAT_PUBSUB_SUBSCRIPTION")
+    if googlechat_sa_json:
+        if Platform.GOOGLECHAT not in config.platforms:
+            config.platforms[Platform.GOOGLECHAT] = PlatformConfig()
+        config.platforms[Platform.GOOGLECHAT].enabled = True
+        extra = config.platforms[Platform.GOOGLECHAT].extra
+        extra["service_account_json"] = googlechat_sa_json
+        if googlechat_pubsub_project:
+            extra["pubsub_project"] = googlechat_pubsub_project
+        if googlechat_pubsub_subscription:
+            extra["pubsub_subscription"] = googlechat_pubsub_subscription
+        googlechat_home = os.getenv("GOOGLECHAT_HOME_CHANNEL")
+        if googlechat_home:
+            config.platforms[Platform.GOOGLECHAT].home_channel = HomeChannel(
+                platform=Platform.GOOGLECHAT,
+                chat_id=googlechat_home,
+                name=os.getenv("GOOGLECHAT_HOME_CHANNEL_NAME", "Home"),
+            )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
