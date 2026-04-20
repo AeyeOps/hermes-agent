@@ -1,0 +1,95 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "America/New_York",
+      "offset": -14400000
+    }
+  },
+  "chat": {
+    "user": {
+      "name": "users/111010463739812255017",
+      "displayName": "Steve Antonakakis",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocK6kafdkrFrSCI2d_vWPayy6Bii1D0N7iYCxJB0CzKVKriP1g=k-no",
+      "email": "steve.antonakakis@moodmedia.com",
+      "type": "HUMAN",
+      "domainId": "3sojat7"
+    },
+    "eventTime": "2026-04-20T21:58:33.299535Z",
+    "messagePayload": {
+      "space": {
+        "name": "spaces/AAQA2N6jyoA",
+        "type": "ROOM",
+        "displayName": "steve-test",
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "SPACE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-04-20T21:58:33.299535Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "customer": "customers/C03sojat7",
+        "spaceUri": "https://chat.google.com/room/AAQA2N6jyoA?cls=11"
+      },
+      "message": {
+        "name": "spaces/AAQA2N6jyoA/messages/5sbze2yV1p0.3V4OcAWj7jk",
+        "sender": {
+          "name": "users/111010463739812255017",
+          "displayName": "Steve Antonakakis",
+          "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocK6kafdkrFrSCI2d_vWPayy6Bii1D0N7iYCxJB0CzKVKriP1g=k-no",
+          "email": "steve.antonakakis@moodmedia.com",
+          "type": "HUMAN",
+          "domainId": "3sojat7"
+        },
+        "createTime": "2026-04-20T21:58:33.299535Z",
+        "text": "@Mood Media Assistant what is your context here can you share it and provide both id as well as the friendly description for each item",
+        "annotations": [
+          {
+            "type": "USER_MENTION",
+            "startIndex": 0,
+            "length": 21,
+            "userMention": {
+              "user": {
+                "name": "users/106622373321617050724",
+                "displayName": "Mood Media Assistant",
+                "avatarUrl": "https://lh6.googleusercontent.com/proxy/wreo2lMKxTkRIJJXS6NyLe3QWcTbxF4zRZOYW8lqYgWdVEcy8HyusK5NoprNiODzE3b4fGzRaLOS-WWj8I_Kae-D3TNxVGMJVrAcrx-DAlp2WPNlroU3iu6RDEyC5g",
+                "type": "BOT"
+              },
+              "type": "MENTION"
+            }
+          }
+        ],
+        "thread": {
+          "name": "spaces/AAQA2N6jyoA/threads/5sbze2yV1p0",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQA2N6jyoA",
+          "type": "ROOM",
+          "displayName": "steve-test",
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "SPACE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-04-20T21:58:33.299535Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "customer": "customers/C03sojat7",
+          "spaceUri": "https://chat.google.com/room/AAQA2N6jyoA?cls=11"
+        },
+        "argumentText": " what is your context here can you share it and provide both id as well as the friendly description for each item",
+        "threadReply": true,
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "@Mood Media Assistant what is your context here can you share it and provide both id as well as the friendly description for each item"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=AEgAulxWtdnsNwfOemLGHeEPbuBehEYydoD1HIFtzs9bADkxoqmlQtiwB60tQvQiZ9UOGYVp6a4NLIN_Xb64obcCwtS9lvNb65n5jb-e7Dfy4kqXwjNongrYUoO1OkMyY7vKYxRUgzKed0Jfx7pVqZa5_A%3D%3D"
+    }
+  }
+}
