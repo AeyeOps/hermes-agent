@@ -3474,6 +3474,16 @@ class GatewayRunner:
                 return None
             return YuanbaoAdapter(config)
 
+        elif platform == Platform.GOOGLECHAT:
+            from gateway.platforms.googlechat import GoogleChatAdapter, check_googlechat_requirements
+            if not check_googlechat_requirements():
+                logger.warning(
+                    "Google Chat: google-cloud-pubsub/google-api-python-client not installed "
+                    "or GOOGLECHAT_SERVICE_ACCOUNT_JSON not configured"
+                )
+                return None
+            return GoogleChatAdapter(config)
+
         return None
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
@@ -3516,7 +3526,10 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+            Platform.GOOGLECHAT: "GOOGLECHAT_ALLOWED_USERS",
         }
+        # Google Chat spaces use the same per-user allowlist as DMs (matching
+        # Slack/Discord); no separate group allowlist env var.
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
         }
@@ -3542,6 +3555,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+            Platform.GOOGLECHAT: "GOOGLECHAT_ALLOW_ALL_USERS",
         }
 
         # Plugin platforms: check the registry for auth env var names
