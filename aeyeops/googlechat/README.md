@@ -18,6 +18,17 @@ Workspace for the Google Chat platform adapter.
 - Dogfooding runbooks and rough edges discovered while using the fork.
 - ADRs for adapter-specific decisions that don't need to land upstream.
 
+## Docs index
+
+- `requirements.md` — UC catalogue that shapes adapter scope.
+- `design.md` — the 16-integration-point design.
+- `plan.md` — plan-level summary of the integration points.
+- `build-plan.md` — milestone/commit sequencing (C0–C34 across M0–M6).
+- `streaming-spec.md` — M6 spec: streaming, HTML rendering, thinking-ack.
+- `roadmap.md` — deferred items (R1: Workspace Events API migration).
+- `adr/` — adopted architectural decisions (001–012).
+- `fixtures/` — captured Chat event samples for test reuse.
+
 ## What does not live here
 
 - Adapter code itself — that lives at `gateway/platforms/googlechat*`.
