@@ -220,6 +220,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
             message.ack()
             return
 
+        # TEMP DEMO-1 diagnostic: capture the raw envelope shape so we can
+        # fix the unwrap if the current assumption is wrong. Remove once
+        # DEMO 1 round-trips cleanly.
+        chat_keys = list((payload.get("chat") or {}).keys()) if isinstance(payload, dict) else []
+        logger.info(
+            "[%s] RAW inbound top_keys=%s chat_keys=%s payload=%s",
+            self.name,
+            list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+            chat_keys,
+            json.dumps(payload)[:1200],
+        )
+
         if self._loop is None:
             logger.error(
                 "[%s] no event loop bound; nack so another worker can pick up",
