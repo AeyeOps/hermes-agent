@@ -309,7 +309,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         space_name = space.get("name", "") or ""
         thread = message.get("thread") or {}
         thread_name = thread.get("name") or None
-        chat_type = "dm" if space.get("type") == "DIRECT_MESSAGE" else "group"
+        # Chat API v1 reports spaceType ∈ {DIRECT_MESSAGE, GROUP_CHAT, SPACE};
+        # the legacy `type` field (DM/ROOM) is deprecated but still emitted in
+        # App Event envelopes, so accept either.
+        space_type_raw = space.get("spaceType") or space.get("type") or ""
+        chat_type = "dm" if space_type_raw in ("DM", "DIRECT_MESSAGE") else "group"
 
         source = self.build_source(
             chat_id=space_name,
