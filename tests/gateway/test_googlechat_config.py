@@ -33,20 +33,20 @@ class TestEnvLoader:
 
     def test_all_four_env_vars_populate_extras(self, monkeypatch):
         monkeypatch.setenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON", "/tmp/key.json")
-        monkeypatch.setenv("GOOGLECHAT_PUBSUB_PROJECT", "sa-mm-gchatbot")
+        monkeypatch.setenv("GOOGLECHAT_PUBSUB_PROJECT", "test-chat-project")
         monkeypatch.setenv("GOOGLECHAT_PUBSUB_SUBSCRIPTION", "chat-events-sub")
-        monkeypatch.setenv("GOOGLECHAT_HOME_CHANNEL", "spaces/AAQA2N6jyoA")
+        monkeypatch.setenv("GOOGLECHAT_HOME_CHANNEL", "spaces/EXAMPLE123XYZ")
 
         config = GatewayConfig()
         _apply_env_overrides(config)
 
         pconfig = config.platforms[Platform.GOOGLECHAT]
         assert pconfig.extra["service_account_json"] == "/tmp/key.json"
-        assert pconfig.extra["pubsub_project"] == "sa-mm-gchatbot"
+        assert pconfig.extra["pubsub_project"] == "test-chat-project"
         assert pconfig.extra["pubsub_subscription"] == "chat-events-sub"
         assert pconfig.home_channel is not None
         assert pconfig.home_channel.platform == Platform.GOOGLECHAT
-        assert pconfig.home_channel.chat_id == "spaces/AAQA2N6jyoA"
+        assert pconfig.home_channel.chat_id == "spaces/EXAMPLE123XYZ"
 
     def test_missing_service_account_leaves_platform_unconfigured(self, monkeypatch):
         monkeypatch.delenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON", raising=False)

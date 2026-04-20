@@ -26,7 +26,7 @@ def test_create_adapter_returns_googlechat_when_requirements_met():
         enabled=True,
         extra={
             "service_account_json": "/tmp/key.json",
-            "pubsub_project": "sa-mm-gchatbot",
+            "pubsub_project": "test-chat-project",
             "pubsub_subscription": "chat-events-sub",
         },
     )

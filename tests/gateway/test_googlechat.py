@@ -36,7 +36,7 @@ class TestGoogleChatAdapterInit:
             enabled=True,
             extra={
                 "service_account_json": "/tmp/key.json",
-                "pubsub_project": "sa-mm-gchatbot",
+                "pubsub_project": "test-chat-project",
                 "pubsub_subscription": "chat-events-sub",
             },
         )
@@ -50,11 +50,11 @@ class TestGoogleChatAdapterInit:
             enabled=True,
             extra={
                 "service_account_json": "/tmp/key.json",
-                "pubsub_project": "sa-mm-gchatbot",
+                "pubsub_project": "test-chat-project",
                 "pubsub_subscription": "chat-events-sub",
             },
         )
         adapter = GoogleChatAdapter(config)
         assert adapter._service_account_path == "/tmp/key.json"
-        assert adapter._pubsub_project == "sa-mm-gchatbot"
+        assert adapter._pubsub_project == "test-chat-project"
         assert adapter._pubsub_subscription == "chat-events-sub"

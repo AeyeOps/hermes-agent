@@ -12,7 +12,7 @@ def _make_adapter() -> GoogleChatAdapter:
         enabled=True,
         extra={
             "service_account_json": "/tmp/key.json",
-            "pubsub_project": "sa-mm-gchatbot",
+            "pubsub_project": "test-chat-project",
             "pubsub_subscription": "chat-events-sub",
         },
     )
@@ -37,47 +37,53 @@ class TestGoogleChatSend:
     async def test_basic_send_posts_to_space(self):
         adapter = _make_adapter()
         response = {
-            "name": "spaces/AAQA2N6jyoA/messages/abc123.abc123",
+            "name": "spaces/EXAMPLE123XYZ/messages/abc123.abc123",
             "text": "hello",
             "createTime": "2026-04-20T15:00:00Z",
         }
         service = _install_chat_service_stub(adapter, response)
 
         result = await adapter.send(
-            chat_id="spaces/AAQA2N6jyoA", content="hello"
+            chat_id="spaces/EXAMPLE123XYZ", content="hello"
         )
 
         assert result.success is True
-        assert result.message_id == "spaces/AAQA2N6jyoA/messages/abc123.abc123"
+        assert result.message_id == "spaces/EXAMPLE123XYZ/messages/abc123.abc123"
         assert result.raw_response == response
 
         create_mock = service.spaces.return_value.messages.return_value.create
         create_mock.assert_called_once()
         kwargs = create_mock.call_args.kwargs
-        assert kwargs["parent"] == "spaces/AAQA2N6jyoA"
+        assert kwargs["parent"] == "spaces/EXAMPLE123XYZ"
         assert kwargs["body"]["text"] == "hello"
         # No thread metadata → no thread field in body
         assert "thread" not in kwargs["body"]
+        # And no messageReplyOption — reserving that for thread-reply posts
+        # avoids accidentally forcing reply mode on first-turn messages.
+        assert "messageReplyOption" not in kwargs
 
     async def test_send_with_thread_id_metadata_threads_reply(self):
         adapter = _make_adapter()
         response = {
-            "name": "spaces/AAQA2N6jyoA/messages/xyz.xyz",
+            "name": "spaces/EXAMPLE123XYZ/messages/xyz.xyz",
             "text": "reply",
-            "thread": {"name": "spaces/AAQA2N6jyoA/threads/T1"},
+            "thread": {"name": "spaces/EXAMPLE123XYZ/threads/T1"},
         }
         service = _install_chat_service_stub(adapter, response)
 
         result = await adapter.send(
-            chat_id="spaces/AAQA2N6jyoA",
+            chat_id="spaces/EXAMPLE123XYZ",
             content="reply",
-            metadata={"thread_id": "spaces/AAQA2N6jyoA/threads/T1"},
+            metadata={"thread_id": "spaces/EXAMPLE123XYZ/threads/T1"},
         )
 
         assert result.success is True
         create_mock = service.spaces.return_value.messages.return_value.create
-        body = create_mock.call_args.kwargs["body"]
-        assert body["thread"] == {"name": "spaces/AAQA2N6jyoA/threads/T1"}
+        kwargs = create_mock.call_args.kwargs
+        assert kwargs["body"]["thread"] == {"name": "spaces/EXAMPLE123XYZ/threads/T1"}
+        # Chat API v1 silently ignores body.thread without this option, so the
+        # two MUST be sent together or the reply starts a new thread.
+        assert kwargs["messageReplyOption"] == "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
     async def test_send_error_returns_failure_result_no_retry(self):
         """Transient API timeout surfaces as failure but not retryable — per
@@ -90,7 +96,7 @@ class TestGoogleChatSend:
         service.spaces.return_value.messages.return_value.create.return_value = create_call
         adapter._chat_service = service
 
-        result = await adapter.send(chat_id="spaces/AAQA2N6jyoA", content="x")
+        result = await adapter.send(chat_id="spaces/EXAMPLE123XYZ", content="x")
 
         assert result.success is False
         assert result.retryable is False
