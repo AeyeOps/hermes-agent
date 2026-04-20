@@ -22,7 +22,7 @@ def _make_bare_runner():
 def _source(user_id: str, chat_type: str = "dm") -> SessionSource:
     return SessionSource(
         platform=Platform.GOOGLECHAT,
-        chat_id="spaces/AAQA2N6jyoA",
+        chat_id="spaces/EXAMPLE123XYZ",
         chat_type=chat_type,
         user_id=user_id,
     )
