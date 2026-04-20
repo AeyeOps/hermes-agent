@@ -262,6 +262,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             payload = message_payload
 
         event_type = payload.get("type") or payload.get("eventType")
+        # App Event envelope doesn't carry an eventType string — infer
+        # MESSAGE from the presence of the message resource. Lifecycle
+        # and card-click inference lands with their M2/M4 fixtures.
+        if not event_type and payload.get("message"):
+            event_type = "MESSAGE"
         if event_type == "MESSAGE":
             await self._handle_message_event(payload)
         elif event_type in ("ADDED_TO_SPACE", "REMOVED_FROM_SPACE"):
