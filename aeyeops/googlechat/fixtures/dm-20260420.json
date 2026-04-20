@@ -1,0 +1,76 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "America/New_York",
+      "offset": -14400000
+    }
+  },
+  "chat": {
+    "user": {
+      "name": "users/111010463739812255017",
+      "displayName": "Steve Antonakakis",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocK6kafdkrFrSCI2d_vWPayy6Bii1D0N7iYCxJB0CzKVKriP1g=k-no",
+      "email": "steve.antonakakis@moodmedia.com",
+      "type": "HUMAN",
+      "domainId": "3sojat7"
+    },
+    "eventTime": "2026-04-20T21:56:46.474671Z",
+    "messagePayload": {
+      "space": {
+        "name": "spaces/vU8MIyAAAAE",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-04-20T21:56:46.474671Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "spaceUri": "https://chat.google.com/dm/vU8MIyAAAAE?cls=11"
+      },
+      "message": {
+        "name": "spaces/vU8MIyAAAAE/messages/xlUhGvvqGus.xlUhGvvqGus",
+        "sender": {
+          "name": "users/111010463739812255017",
+          "displayName": "Steve Antonakakis",
+          "avatarUrl": "https://lh3.googleusercontent.com/a/ACg8ocK6kafdkrFrSCI2d_vWPayy6Bii1D0N7iYCxJB0CzKVKriP1g=k-no",
+          "email": "steve.antonakakis@moodmedia.com",
+          "type": "HUMAN",
+          "domainId": "3sojat7"
+        },
+        "createTime": "2026-04-20T21:56:46.474671Z",
+        "text": "capture dm",
+        "thread": {
+          "name": "spaces/vU8MIyAAAAE/threads/xlUhGvvqGus",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/vU8MIyAAAAE",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-04-20T21:56:46.474671Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "spaceUri": "https://chat.google.com/dm/vU8MIyAAAAE?cls=11"
+        },
+        "argumentText": "capture dm",
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "capture dm"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=AEgAulyQYG02a0rCBtH91hslHkuU3q68bX17GyKC3wja_13XegY-kpsBMEcrggIETLllofQ82aGS7bOCxILZiSHfQiOggSm3RF-GjygH_unFUstMI9i-OgpiFehitbn4OnN4yz60piOLyLiY_terBpI7hw%3D%3D"
+    }
+  }
+}
