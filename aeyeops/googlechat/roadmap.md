@@ -74,9 +74,10 @@ authorized to read, enabling mention-free thread conversation.
    replay? Regress-risking if we post responses twice because an
    envelope fell through both streams after a gateway crash.
 
-If those three are answered, this becomes a concrete milestone (probably
-`C15: Workspace Events API subscription for group spaces`, slotted after
-the current C10-C12 prompt/format work). Until then it stays here.
+If those three are answered, this becomes a concrete milestone — slotted
+after the current in-flight work (C10–C14 format/lifecycle, then
+C29–C34 streaming/rendering/thinking-ack per
+[`streaming-spec.md`](./streaming-spec.md)). Until then it stays here.
 
 **Links.** Chat interaction events list:
 <https://developers.google.com/workspace/chat/events>. Workspace Events

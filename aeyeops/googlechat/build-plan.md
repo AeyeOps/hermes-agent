@@ -245,10 +245,43 @@ the same session.
 
 | # | Commit | Files | Test | Live GCP? |
 |---|---|---|---|---|
-| C25 | `feat(googlechat): typing indicator (or documented no-op)` | `gateway/platforms/googlechat.py`: Google Chat REST API has **no public typing-indicator endpoint** as of 2026-04 (verify against current Chat API docs at implementation time — see Research Items below). If still unsupported, keep base `send_typing` no-op and add a one-line code comment `# Chat API has no public typing endpoint as of <date> — keeping base no-op`. NO speculative implementation. | unit test that `send_typing` returns without error | no |
+| C25 | `feat(googlechat): typing indicator (or documented no-op)` — **superseded by M6** (`streaming-spec.md`). Chat API still has no native typing endpoint as of 2026-04-20, so the placeholder-message approach in M6 replaces the "base no-op" disposition. When M6 lands, C25 becomes a no-op or is dropped from the sequence. | see M6 | see M6 | no |
 | C26 | `feat(googlechat): inbound media caching` | `gateway/platforms/googlechat.py`: in MESSAGE branch, when `event.message.attachment` is present, call `cache_image_from_bytes` / `cache_audio_from_bytes` / `cache_document_from_bytes` and append to `MessageEvent.media_urls` / `media_types`. Use `SUPPORTED_DOCUMENT_TYPES` from base. Outbound media via `send_image` defers to base default until a real use case appears. | mock attachment download + cache call assertions | no |
 | C27 | `feat(googlechat): redaction regexes for spaces/* + users/* IDs` | `agent/redact.py:161-174`: add patterns matching `spaces/[A-Za-z0-9_-]+`, `users/\d{15,25}`, `messages/[A-Za-z0-9_.-]+` (the doubled-ID pattern from the recent-knowledge entry). Add to existing token list. | redaction test cases for each regex | no |
 | C28 | `feat(googlechat): hermes_cli/status.py + hermes_cli/gateway.py wizard` | `hermes_cli/status.py:306-311` (verified — dict values are `(TOKEN_VAR, HOME_CHANNEL_VAR)` 2-tuples per `ADDING_A_PLATFORM.md:228-233`) — add `"Google Chat": ("GOOGLECHAT_SERVICE_ACCOUNT_JSON", "GOOGLECHAT_HOME_CHANNEL")` (NOT the Pub/Sub subscription — that's transport config, already surfaced via the config file path; the home-channel slot is the conventional second var, loaded in C2's env-override pass). `hermes_cli/gateway.py:2015` (verified) `_PLATFORMS` — add interactive wizard entry covering GCP project / service account path / subscription name / home-channel space resource name / IAM publisher binding reminder. (The shared `hermes_cli/platforms.py` registry was already updated in C12.5 — no second touch needed here.) | snapshot tests for both; assert the status dict's `"Google Chat"` tuple matches the 2-tuple convention | no |
+
+---
+
+## M6 — Streaming, HTML rendering, and thinking-ack (6 commits, serial)
+
+Authoritative source: [`streaming-spec.md`](./streaming-spec.md). The spec
+covers user-visible behaviour (placeholder ack, progressive delivery,
+content-aware finalize routing to either Chat markdown or cardsV2 HTML),
+the API mechanics (`spaces.messages.patch` with `updateMask=text` or
+`cardsV2`), and the per-turn rate-limit budget against Chat's 1 write/sec
+per-space cap.
+
+Proposed commits C29–C34 (details in spec):
+
+| # | Commit | Depends on |
+|---|---|---|
+| C29 | `test(googlechat): thinking-ack placeholder lifecycle` | C11 |
+| C30 | `feat(googlechat): send_typing/stop_typing placeholder (per-chat idempotent)` | C29 |
+| C31 | `test(googlechat): streaming edit_message — patch cadence + cursor strip + overflow split` | C30 |
+| C32 | `feat(googlechat): edit_message via spaces.messages.patch + placeholder→streaming handoff in send()` | C31 |
+| C33 | `test(googlechat): finalize routing — text vs cardsV2 + GFM→HTML translator` | C32 |
+| C34 | `feat(googlechat): cardsV2 finalize path + REQUIRES_EDIT_FINALIZE + GFM→HTML translator` | C33 |
+
+**🟢 DEMO #4** — after M6 lands: in `steve-test`, prompt the bot for output
+that contains a nested list or a fenced code block. Verify (a) placeholder
+within ~1s, (b) progressive text updates at ~1 Hz cadence, (c) final
+render uses the text field for simple content, cardsV2 HTML for nested
+lists / language-tagged code.
+
+M6 supersedes C25's "documented no-op" disposition (see updated C25 row
+above). Open questions flagged in the spec (`NEEDS_VERIFY` items — most
+notably whether `PATCH updateMask=cardsV2` can replace a streamed text
+message) resolve during implementation, not now.
 
 ---
 
