@@ -29,13 +29,37 @@ from typing import Any, Dict, Optional
 
 try:
     from google.cloud import pubsub_v1  # noqa: F401
+    from google.oauth2 import service_account  # noqa: F401
     from googleapiclient import discovery  # noqa: F401
 
     GOOGLECHAT_AVAILABLE = True
 except ImportError:
     GOOGLECHAT_AVAILABLE = False
     pubsub_v1 = None  # type: ignore[assignment]
+    service_account = None  # type: ignore[assignment]
     discovery = None  # type: ignore[assignment]
+
+# Google's public Chat API reference does not document an explicit limit on
+# the `text` field as of 2026-04-20; the practical ceiling cited by Chat
+# Community threads is ~32,000 bytes for the whole message resource. We
+# chunk at 4,096 characters by default — comfortably under 32 KB even when
+# the content is multi-byte UTF-8 — and let operators tune via
+# config.extra["max_message_length"] or GOOGLECHAT_MAX_MESSAGE_LENGTH when
+# Google eventually publishes an exact number.
+#
+# Refs:
+#   https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/create
+#   https://support.google.com/chat/thread/228198957
+GOOGLE_CHAT_MAX_MESSAGE_LENGTH = 4096
+
+# Per-space write quota documented by Google is 1 write/sec (see reference
+# above). Multi-chunk sends pace themselves at this interval so they don't
+# immediately trigger 429 on their own tail. Single-chunk sends pay zero
+# added latency. The base adapter's _send_with_retry handles retries for
+# 429 on the first chunk via the retryable flag returned in SendResult.
+_PER_SPACE_QPS_DELAY_SECONDS = 1.1
+
+CHAT_API_SCOPES = ["https://www.googleapis.com/auth/chat.bot"]
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -88,10 +112,25 @@ class GoogleChatAdapter(BasePlatformAdapter):
             "GOOGLECHAT_BOT_USER_ID"
         )
 
+        max_len_raw = extra.get("max_message_length") or os.getenv(
+            "GOOGLECHAT_MAX_MESSAGE_LENGTH"
+        )
+        try:
+            self._max_message_length: int = int(max_len_raw) if max_len_raw else GOOGLE_CHAT_MAX_MESSAGE_LENGTH
+        except (TypeError, ValueError):
+            logger.warning(
+                "[%s] invalid max_message_length=%r; falling back to default %d",
+                self.platform.value,
+                max_len_raw,
+                GOOGLE_CHAT_MAX_MESSAGE_LENGTH,
+            )
+            self._max_message_length = GOOGLE_CHAT_MAX_MESSAGE_LENGTH
+
         self._dedup = MessageDeduplicator(max_size=1000)
         self._subscriber: Any = None
         self._pull_future: Any = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._chat_service: Any = None
 
     # -- Connection lifecycle -----------------------------------------------
 
@@ -273,6 +312,31 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     # -- Outbound ----------------------------------------------------------
 
+    def _ensure_chat_service(self) -> Any:
+        """Lazily build the Chat REST discovery client using SA credentials.
+
+        Returns None when the SDK isn't importable, the SA path isn't set,
+        or the credentials can't be loaded — send() maps any of these to
+        SendResult(success=False, retryable=False) without crashing.
+        """
+        if self._chat_service is not None:
+            return self._chat_service
+        if not GOOGLECHAT_AVAILABLE:
+            return None
+        if not self._service_account_path:
+            return None
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                self._service_account_path, scopes=CHAT_API_SCOPES
+            )
+            self._chat_service = discovery.build(
+                "chat", "v1", credentials=creds, cache_discovery=False
+            )
+        except Exception:
+            logger.exception("[%s] failed to build Chat REST client", self.name)
+            return None
+        return self._chat_service
+
     async def send(
         self,
         chat_id: str,
@@ -280,7 +344,87 @@ class GoogleChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        raise NotImplementedError("send() lands in C8")
+        service = self._ensure_chat_service()
+        if service is None:
+            return SendResult(
+                success=False,
+                error="Google Chat service is not configured",
+                retryable=False,
+            )
+
+        formatted = self.format_message(content)
+        chunks = self.truncate_message(
+            formatted, max_length=self._max_message_length
+        )
+
+        thread_name = (metadata or {}).get("thread_id")
+        last_response: Any = None
+        last_message_id: Optional[str] = None
+        loop = asyncio.get_running_loop()
+
+        for index, chunk in enumerate(chunks):
+            if index > 0:
+                # Respect Google Chat's per-space 1-write/sec cap so chunk N
+                # doesn't 429 on chunk N-1's own heels.
+                await asyncio.sleep(_PER_SPACE_QPS_DELAY_SECONDS)
+
+            body: Dict[str, Any] = {"text": chunk}
+            if thread_name:
+                body["thread"] = {"name": thread_name}
+
+            def _execute() -> Any:
+                return (
+                    service.spaces()
+                    .messages()
+                    .create(parent=chat_id, body=body)
+                    .execute()
+                )
+
+            try:
+                response = await loop.run_in_executor(None, _execute)
+            except Exception as exc:  # noqa: BLE001
+                # If we've already posted earlier chunks, force non-retryable
+                # so the base class's _send_with_retry doesn't duplicate them.
+                retryable = _is_retryable_chat_error(exc) and last_message_id is None
+                logger.warning(
+                    "[%s] send failed chat_id=%s chunk=%d/%d retryable=%s: %s",
+                    self.name,
+                    chat_id,
+                    index + 1,
+                    len(chunks),
+                    retryable,
+                    exc,
+                )
+                return SendResult(
+                    success=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    retryable=retryable,
+                )
+
+            last_response = response
+            last_message_id = (response or {}).get("name") or last_message_id
+
+        return SendResult(
+            success=True,
+            message_id=last_message_id,
+            raw_response=last_response,
+            retryable=False,
+        )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         raise NotImplementedError("get_chat_info() lands with space lookup support")
+
+
+def _is_retryable_chat_error(exc: BaseException) -> bool:
+    """Return True for errors the base class should treat as retryable.
+
+    Honors HTTP 429 (rate-limit) and 5xx (server transient) when the Google
+    API client raises HttpError. Plain timeouts / connection resets are
+    treated as non-retryable (Telegram precedent — the message may have
+    landed upstream and we don't want to double-post).
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if isinstance(status, int):
+        if status == 429 or 500 <= status < 600:
+            return True
+    return False
