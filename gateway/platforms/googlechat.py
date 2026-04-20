@@ -242,6 +242,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _handle_chat_event(self, payload: Dict[str, Any]) -> None:
         """Route a decoded Chat event payload by type."""
+        # Chat's App Event envelope nests the legacy fields under
+        # payload["chat"]["messagePayload"]. Unwrap so the routing below
+        # works against both the legacy and current shapes.
+        message_payload = (payload.get("chat") or {}).get("messagePayload")
+        if message_payload:
+            payload = message_payload
+
         event_type = payload.get("type") or payload.get("eventType")
         if event_type == "MESSAGE":
             await self._handle_message_event(payload)
