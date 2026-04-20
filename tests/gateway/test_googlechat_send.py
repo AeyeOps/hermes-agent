@@ -107,29 +107,24 @@ class TestGoogleChatSend:
         assert result.retryable is False
 
     async def test_send_truncates_to_chat_max(self, monkeypatch):
-        """Body text respects GOOGLE_CHAT_MAX_MESSAGE_LENGTH — the first chunk
-        posts and subsequent chunks post as continuation messages in the same
-        thread (if threading metadata was supplied)."""
+        """Body text respects _max_message_length; content longer than the
+        limit dispatches multiple spaces.messages.create calls."""
         from gateway.platforms import googlechat as mod
 
-        # Force a tiny limit so the test string gets chunked deterministically.
-        monkeypatch.setattr(mod, "GOOGLE_CHAT_MAX_MESSAGE_LENGTH", 10)
+        # Skip the per-space pacing sleep so the test is fast.
+        monkeypatch.setattr(mod, "_PER_SPACE_QPS_DELAY_SECONDS", 0)
+
         adapter = _make_adapter()
+        adapter._max_message_length = 40
 
-        response_1 = {"name": "spaces/x/messages/a.a", "text": "0123456789"}
-        response_2 = {"name": "spaces/x/messages/b.b", "text": "abcdef"}
-
+        response = {"name": "spaces/x/messages/a.a", "text": "chunk"}
         service = MagicMock()
-        execute_mock = MagicMock(side_effect=[response_1, response_2])
         create_mock = service.spaces.return_value.messages.return_value.create
-        create_mock.return_value.execute = execute_mock
+        create_mock.return_value.execute.return_value = response
         adapter._chat_service = service
 
-        result = await adapter.send(
-            chat_id="spaces/x", content="0123456789abcdef"
-        )
+        # 200 chars of content, 40 chars/chunk → base.truncate_message chunks it.
+        result = await adapter.send(chat_id="spaces/x", content="a" * 200)
 
         assert result.success is True
-        # First (or final) message_id returned — implementation chooses; we
-        # only assert that both chunks were created.
-        assert create_mock.call_count == 2
+        assert create_mock.call_count >= 2
