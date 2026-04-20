@@ -9,6 +9,9 @@ scratch work live here instead.
 
 ## Layout
 
+- `runbook.md` — generic operational notes for installing, updating, and
+  running this fork against a live gateway. Kept deliberately host-agnostic
+  so it's safe in a public fork.
 - `googlechat/` — design notes, spec, architecture decisions, and runbooks for
   the Google Chat platform adapter.
 
