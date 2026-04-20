@@ -401,10 +401,17 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 body["thread"] = {"name": thread_name}
 
             def _execute() -> Any:
+                kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
+                if thread_name:
+                    # Chat API v1 only threads the reply when messageReplyOption
+                    # is set; otherwise body["thread"]["name"] is ignored and
+                    # every reply starts a new thread, which breaks mention-free
+                    # follow-ups in group spaces.
+                    kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
                 return (
                     service.spaces()
                     .messages()
-                    .create(parent=chat_id, body=body)
+                    .create(**kwargs)
                     .execute()
                 )
 
