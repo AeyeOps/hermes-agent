@@ -189,6 +189,22 @@ Total per turn: `1 + N (≤ seconds-of-generation) + 0-or-1`. At 1 write/sec tha
 
 If the agent generates faster than 1 token/sec worth of deltas, the stream consumer coalesces via its internal buffer, so we don't hit 429.
 
+### Interrupt / cancel during stream (inherited, no adapter work)
+
+A second inbound message during an in-flight turn already interrupts the
+running agent via `running_agent.interrupt(event.text)` in
+`gateway/run.py:1536`, with the new message queued as the next turn's
+input. The stream consumer's `asyncio.CancelledError` path
+(`gateway/stream_consumer.py:452`) makes a best-effort final edit to strip
+the cursor from the partial message. The partial stays visible; the new
+turn creates a fresh placeholder → fresh streamed message.
+
+This works on Google Chat today for DMs (every DM dispatches) and for
+ROOMs whenever the second message @-mentions the bot (same R1 mention
+constraint that gates all inbound in group spaces). No Cancel button,
+no `/stop` registration, no adapter-side state needed — the base-class
+interrupt wiring is enough.
+
 ---
 
 ## Open questions
