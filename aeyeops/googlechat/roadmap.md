@@ -30,6 +30,36 @@ and the implementation merges, the entry is kept with a `Resolved`
 marker — so future sessions can see why it was considered and how it
 closed, not just that it vanished.
 
+### Gate criteria
+
+A stage is cleared when its artifact meets these bars; a vague "seems
+fine" is not a pass.
+
+- **Stage 1 clears (green)** when the artifact contains: (1) at least
+  one working Chat API endpoint identified by URL and HTTP method,
+  (2) the required OAuth scope(s) documented and checked against the
+  service-account's current grant, (3) at least one peer-adapter
+  parallel (what does telegram / slack / discord / matrix do at the
+  same layer?), (4) size / quota / rate-limit facts sourced from
+  documentation with fetch date.
+- **Stage 1 clears with caveats (yellow)** when the above bars are met
+  but at least one significant constraint surfaces (e.g., elevated
+  scope needed, or an R1-style transport-layer dependency). Stage 2
+  proceeds but carries the caveat forward.
+- **Stage 1 closes the item** (**no** Stage 2) when research surfaces
+  either that the capability is infeasible under our auth / transport
+  / scope envelope, or that it's feasible but the complexity cost is
+  judged unworth the UX gain. Close with an ADR recording the
+  decision.
+- **Stage 2 clears** when the artifact identifies the concrete
+  base-class hooks to override, the peer adapter used as a design
+  template, the adapter-side state (if any), and any ADR amendments
+  implied. Hand-waving cross-references ("like slack does") don't
+  pass — cite the file + line range.
+- **Stage 3 clears** when the artifact lists the commit sequence
+  (C##), each commit's scope and test plan, the milestone placement,
+  and how DEMO verification exercises it.
+
 R1 predates this workflow; it remains as a narrative decision-gate and
 is not re-cast into the three-stage structure.
 
@@ -115,11 +145,26 @@ API: <https://developers.google.com/workspace/events>.
 
 **Observed 2026-04-23.** Differential against the eight close-peer
 adapters (slack, discord, telegram, matrix, whatsapp, mattermost,
-signal, bluebubbles) shows every one of them implements the media-sender
-family. `gateway/platforms/googlechat.py` has zero attachment handling.
-ADR-012 confines outbound rendering to text + cardsV2, which covers
-*linkified* media via card widgets but does not cover raw file upload
-or inbound attachment download.
+signal, bluebubbles) shows every one of them overrides the
+media-sender family for native upload. `gateway/platforms/googlechat.py`
+overrides none of them — it inherits the base class's URL-as-text
+fallback (`gateway/platforms/base.py:1147-1164` for `send_image`; the
+other senders share the pattern). So outbound media "works" in the
+degenerate sense — the URL goes through as plain text — but there is
+no native upload, no image widget promotion, no Drive-attachment path.
+
+On the inbound side, `_handle_message_event` at
+`gateway/platforms/googlechat.py:279-327` constructs a
+`MessageEvent(message_type=TEXT)` from `message.text` only; it never
+populates `media_urls` / `media_types` (the `MessageEvent` fields for
+media, per `base.py:710-711`) from `message.attachment[]`. Inbound
+attachments are silently dropped today.
+
+ADR-012 scoped Card v2 widgets (including `image`) but deliberately did
+not touch the base-class media senders — "Existing base-class `send()`,
+`send_image()`, `send_typing()` methods stay as they are"
+(`adr/012-card-v2-interface.md:102-104`). R2 is the follow-up that
+promotes those inherited fallbacks to native Chat upload.
 
 **Peer cross-reference (outbound surface):**
 
@@ -145,15 +190,12 @@ should attach it, not link it.
 Open research questions. Treat each as a verification task against
 current Chat API docs (cite URL + fetch date):
 
+**Outbound (bot → user):**
+
 - **Upload surface.** Does `spaces.messages.create` accept binary
   attachments in the request body, or must media be staged through
   `media.upload` (scope: `chat.bot` + `chat.import` or similar) and
   referenced by `attachment.attachmentDataRef.resourceName`?
-- **Download surface.** Inbound messages with attachments expose
-  `message.attachment[].downloadUri` / `thumbnailUri`. Can a
-  service-account bot authenticate those URIs with its current
-  `chat.bot` scope, or is `chat.messages.readonly` + elevated media
-  scope needed?
 - **Size limits.** Per-attachment max (suspect 200 MB historically;
   verify). Per-message aggregate max.
 - **Rate limits.** Is media upload accounted against the per-space
@@ -165,6 +207,27 @@ current Chat API docs (cite URL + fetch date):
   by `driveDataRef.driveFileId`. What scope grant does the service
   account need to attach a Drive file it owns? Is that a plausible
   fallback for cases where direct upload is restricted?
+
+**Inbound (user → bot):**
+
+- **Envelope shape.** For a Chat message carrying an image, audio, or
+  file attachment, what does `message.attachment[]` look like in the
+  App Event envelope the adapter already receives? Capture a fixture
+  (same approach as `fixtures/` for message events).
+- **Download surface.** Inbound messages with attachments expose
+  `downloadUri` / `thumbnailUri`. Can a service-account bot authenticate
+  those URIs with its current `chat.bot` scope, or is
+  `chat.messages.readonly` + elevated media scope needed?
+- **Gateway media-cache compatibility.** Hermes already caches
+  downloaded media for vision-tool access (`media_urls` on
+  `MessageEvent`). Does the existing cache accept downloaded Chat
+  binaries, or do we need an adapter-side write-through? Cross-reference
+  how telegram / discord adapters wire their downloads into the cache.
+- **MessageEvent type selection.** If a message carries only an
+  attachment (no text), should we still emit `MessageType.TEXT` with a
+  placeholder text, or switch to `MessageType.PHOTO` /
+  `MessageType.DOCUMENT` / etc.? The photo-burst interrupt-queueing
+  path (`base.py:1716-1719`) behaves differently per type.
 
 **Output:** `aeyeops/googlechat/roadmap/R2-stage1.md` — verdict plus
 caveats. Cite sources. Note any ADR amendments implied (e.g., ADR-012
@@ -179,21 +242,26 @@ If Stage 1 returns **infeasible**, R2 resolves there with the rationale.
 
 Sketch only, pending Stage 1 verdict:
 
-- Add `send_image` / `send_video` / `send_voice` / `send_document` on
-  `GoogleChatAdapter`. Signature should match the existing peers — the
-  base class already has `send_image_file`/`send_image` shapes.
-- Inbound: extend `_handle_message_event` to hydrate
-  `MessageEvent.attachments` (or equivalent) from
-  `message.attachment[]`, including a fetch helper that streams the
-  binary via `media.download` and caches through the existing media
-  cache the gateway already provides for other adapters.
+- Override `send_image` / `send_video` / `send_voice` / `send_document`
+  on `GoogleChatAdapter` to replace the inherited URL-as-text fallback
+  (`base.py:1147-1310`) with native Chat upload. Signatures already
+  fixed by the base class; adapter just supplies a real implementation.
+- Inbound: extend `_handle_message_event` (`googlechat.py:279-327`) to
+  populate `MessageEvent.media_urls` and `MessageEvent.media_types`
+  (per `base.py:710-711`) from `message.attachment[]`, with a fetch
+  helper that streams the binary via Chat's media-download surface and
+  writes into the gateway's existing media cache the same way telegram
+  / discord adapters do (cross-reference at Stage 2 research time).
 - Scope grant: if Stage 1 confirms the need, coordinate with the
   service-account grant in the GCP console and document in an ADR
   amendment.
-- Upstream impact: whether this widens the scope of ADR-003
-  ("adapter = I/O only") depends on how much media-handling logic the
-  base class already owns vs how much is per-platform. Peer survey will
-  answer this.
+- ADR alignment: ADR-003 already scopes media I/O into the adapter
+  (`adr/003-adapter-scope-io-only.md:33`, point 4 — "Send outbound
+  text/media via base-class primitives"). R2 overrides an in-scope
+  inherited default; no ADR-003 amendment required. If Stage 1 surfaces
+  a Drive-attachment path the adapter chooses to support, that may
+  warrant an ADR-012 amendment (Card v2 interface widens to include a
+  Drive-file widget), not an ADR-003 one.
 
 **Status:** blocked on Stage 1.
 
@@ -243,8 +311,15 @@ Open research questions:
   set?
 - **Inbound delivery.** Reaction events — delivered over the existing
   Chat-API Pub/Sub interaction events channel, or only via Workspace
-  Events API (`google.workspace.chat.message.v1.*`)? If the latter, R3
-  entangles with R1 and should not proceed until R1 is resolved.
+  Events API (`google.workspace.chat.message.v1.*`)? This is the pivot
+  that decides R3's shape. The pre-committed disposition (so Stage 1
+  doesn't need to re-decide): **if Pub/Sub carries reaction events**,
+  proceed with R3 independently. **If only Workspace Events carries
+  them**, implement the outbound-only subset (`_add_reaction` /
+  `_remove_reaction`) as a thin R3a; block the inbound handler (R3b)
+  on R1. Reject "close R3 outright" as a disposition — outbound-only
+  reactions are a meaningful UX win and don't require the
+  R1-transport refactor.
 - **Dispatch gating in ROOMs.** For ROOMs, does the app receive
   reactions on messages it did NOT author? On its own messages? By
   analogy to the R1 `@mention`-dispatch gating, we cannot assume
@@ -326,11 +401,15 @@ Open research questions:
 - **Thread name stability.** Is `Message.thread.name` durable across
   our process restarts and across gateway restarts? (Suspect yes —
   it's a resource name, not a session handle.) Verify explicitly.
-- **`messageReplyOption` reliability.** When we send with
-  `messageReplyOption=REPLY_MESSAGE_OR_FAIL_IF_NOT_FOUND` and a
-  stale thread name, what error surface does the API present? Do we
-  need retry-with-new-thread semantics, or is the 6b6d8e1b wiring
-  sufficient?
+- **`messageReplyOption` branch observability.** Current adapter sets
+  `REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD` at
+  `gateway/platforms/googlechat.py:398`. Stage 1 should verify: (a)
+  does the API response distinguish "threaded into the original thread"
+  from "fell back to a new thread"? (b) if not, does the agent need to
+  know which branch happened? (c) would switching to
+  `REPLY_MESSAGE_OR_FAIL_IF_NOT_FOUND` plus explicit retry-on-failure
+  give us a cleaner error surface for the cases where we genuinely want
+  the reply to land in the original thread or nowhere?
 - **DM threading model.** A Chat DM — are all messages siblings at the
   space root, or does Chat create threads within DMs too? If root,
   thread context is space context (simple). If nested, we may need to
