@@ -25,7 +25,9 @@ Workspace for the Google Chat platform adapter.
 - `plan.md` — plan-level summary of the integration points.
 - `build-plan.md` — milestone/commit sequencing (C0–C34 across M0–M6).
 - `streaming-spec.md` — M6 spec: streaming, HTML rendering, thinking-ack.
-- `roadmap.md` — deferred items (R1: Workspace Events API migration).
+- `roadmap.md` — deferred items, staged through feasibility → impl-path →
+  impl-plan gates. R1: Workspace Events API migration. R2: outbound media
+  senders. R3: reactions. R4: thread-context parity assessment.
 - `adr/` — adopted architectural decisions (001–012).
 - `fixtures/` — captured Chat event samples for test reuse.
 
