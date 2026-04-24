@@ -1,0 +1,31 @@
+{
+  "type": "MESSAGE",
+  "space": {
+    "name": "spaces/EXAMPLE123XYZ",
+    "displayName": "test-room",
+    "spaceType": "SPACE"
+  },
+  "message": {
+    "name": "spaces/EXAMPLE123XYZ/messages/ATTACHIMG.ATTACHIMG",
+    "sender": {
+      "name": "users/111000000000000000001",
+      "displayName": "Test User",
+      "type": "HUMAN"
+    },
+    "text": "image attached",
+    "thread": {
+      "name": "spaces/EXAMPLE123XYZ/threads/THRIMG"
+    },
+    "attachment": [
+      {
+        "name": "spaces/EXAMPLE123XYZ/messages/ATTACHIMG.ATTACHIMG/attachments/A1",
+        "contentName": "sample.png",
+        "contentType": "image/png",
+        "source": "UPLOADED_CONTENT",
+        "attachmentDataRef": {
+          "resourceName": "spaces/EXAMPLE123XYZ/messages/ATTACHIMG.ATTACHIMG/attachments/A1/media"
+        }
+      }
+    ]
+  }
+}
