@@ -30,6 +30,11 @@ Workspace for the Google Chat platform adapter.
   senders. R3: reactions. R4: thread-context parity assessment.
 - `adr/` — adopted architectural decisions (001–012).
 - `fixtures/` — captured Chat event samples for test reuse.
+- `provisioning/requirements.yaml` — fork-local source of truth for the
+  live Google Chat app, service account, Pub/Sub resources, and required
+  OAuth scopes by capability.
+- `verify/` — live probes and admin-request notes that validate the
+  provisioning requirements without hardcoding them in core adapter code.
 
 ## What does not live here
 
