@@ -3,6 +3,12 @@
 **Status**: Accepted
 **Date**: 2026-04-20
 
+**Follow-up**: ADR-013 proposes administrator-approved `chat.app.*`
+app-auth scopes for post-DEMO capabilities. This does not change the
+initial adapter auth model: `chat.bot` remains the accepted baseline, and
+domain-wide delegation remains out of scope unless ADR-013 verification
+proves app-auth scopes cannot satisfy a follow-up feature.
+
 ## Context
 
 In Google Workspace, a Chat app has three realistic authentication
