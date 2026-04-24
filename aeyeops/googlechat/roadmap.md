@@ -5,6 +5,23 @@ would otherwise disappear into session context. Each entry records the
 motivating observation, the option space, and the decision gate — not a
 commitment.
 
+## 2026-04-24 Stage 1 status
+
+The R1-R4 feasibility pass landed as separate artifacts under
+`aeyeops/googlechat/roadmap/`.
+
+| Item | Status | Artifact |
+|---|---|---|
+| R1 mention-free group-space delivery | Feasible with caveats; gated on ADR-013 live auth verification | [`roadmap/R1-stage1.md`](./roadmap/R1-stage1.md) |
+| R2a inbound media hydration | Feasible under current `chat.bot`; M7 implementation path active | [`roadmap/R2-stage1.md`](./roadmap/R2-stage1.md) |
+| R2b outbound native upload | Feasible with caveats; gated on ADR-013 live auth verification | [`roadmap/R2-stage1.md`](./roadmap/R2-stage1.md) |
+| R3 lifecycle reactions | Feasible with caveats; gated on ADR-013 live auth verification | [`roadmap/R3-stage1.md`](./roadmap/R3-stage1.md) |
+| R4 thread-context parity | Resolved: native Chat threading is sufficient; no adapter cache | [`roadmap/R4-stage1.md`](./roadmap/R4-stage1.md), [`adr/014-native-chat-threading-sufficient.md`](./adr/014-native-chat-threading-sufficient.md) |
+
+ADR-013 is **Proposed**, not accepted. Public docs checked on
+2026-04-24 still require live verification for the exact app-auth scope
+coverage and Workspace Events subscription TTL in the target tenant.
+
 ## Workflow: feasibility → implementation path → implementation plan
 
 Capability-gap items (R2+) progress through three gates before any code
