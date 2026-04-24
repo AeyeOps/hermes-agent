@@ -211,6 +211,8 @@ def _handle_send(args):
 
     # Accept any platform name — built-in names resolve to their enum
     # member, plugin platform names create dynamic members via _missing_().
+    # This covers Google Chat, Yuanbao, and future plugin platforms without
+    # maintaining a duplicated send-message platform map.
     try:
         platform = Platform(platform_name)
     except (ValueError, KeyError):
@@ -625,6 +627,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_dingtalk(pconfig.extra, chat_id, chunk)
         elif platform == Platform.FEISHU:
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
+        elif platform == Platform.GOOGLECHAT:
+            result = await _send_googlechat(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
         elif platform == Platform.BLUEBUBBLES:
@@ -1633,6 +1637,31 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
         }
     except Exception as e:
         return _error(f"Feishu send failed: {e}")
+
+
+async def _send_googlechat(pconfig, chat_id, message, thread_id=None):
+    """Send via Google Chat using the adapter's Chat REST path."""
+    try:
+        from gateway.platforms.googlechat import GoogleChatAdapter, check_googlechat_requirements
+        if not check_googlechat_requirements(pconfig):
+            return {"error": "Google Chat requirements not met. Run: pip install 'hermes-agent[googlechat]' and configure service_account_json."}
+    except ImportError:
+        return {"error": "Google Chat adapter not available."}
+
+    try:
+        adapter = GoogleChatAdapter(pconfig)
+        metadata = {"thread_id": thread_id} if thread_id else None
+        result = await adapter.send(chat_id, message, metadata=metadata)
+        if not result.success:
+            return _error(f"Google Chat send failed: {result.error}")
+        return {
+            "success": True,
+            "platform": "googlechat",
+            "chat_id": chat_id,
+            "message_id": result.message_id,
+        }
+    except Exception as e:
+        return _error(f"Google Chat send failed: {e}")
 
 
 def _check_send_message():

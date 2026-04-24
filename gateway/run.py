@@ -3476,10 +3476,10 @@ class GatewayRunner:
 
         elif platform == Platform.GOOGLECHAT:
             from gateway.platforms.googlechat import GoogleChatAdapter, check_googlechat_requirements
-            if not check_googlechat_requirements():
+            if not check_googlechat_requirements(config):
                 logger.warning(
                     "Google Chat: google-cloud-pubsub/google-api-python-client not installed "
-                    "or GOOGLECHAT_SERVICE_ACCOUNT_JSON not configured"
+                    "or service_account_json not configured"
                 )
                 return None
             return GoogleChatAdapter(config)
