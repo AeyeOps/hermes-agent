@@ -74,11 +74,12 @@ from gateway.platforms.helpers import MessageDeduplicator
 logger = logging.getLogger(__name__)
 
 
-def check_googlechat_requirements() -> bool:
-    """Return True when SDKs are importable and the service-account env is set."""
+def check_googlechat_requirements(config: Optional[PlatformConfig] = None) -> bool:
+    """Return True when SDKs are importable and service-account config exists."""
     if not GOOGLECHAT_AVAILABLE:
         return False
-    if not os.getenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON"):
+    extra = (config.extra or {}) if config else {}
+    if not (extra.get("service_account_json") or os.getenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON")):
         return False
     return True
 
@@ -155,11 +156,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
             )
             return False
 
-        scope_identity = f"{self._pubsub_project}/{self._pubsub_subscription}"
+        scope_identity = self._credential_lock_identity()
         if not self._acquire_platform_lock(
-            scope="googlechat_subscription",
+            scope="googlechat_bot_credential",
             identity=scope_identity,
-            resource_desc=f"Pub/Sub subscription {scope_identity}",
+            resource_desc=f"Google Chat bot credential {scope_identity}",
         ):
             return False
 
@@ -188,6 +189,18 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         self._running = True
         return True
+
+    def _credential_lock_identity(self) -> str:
+        """Return a stable lock key for the bot identity, not the subscription."""
+        credential_path = os.path.abspath(os.path.expanduser(self._service_account_path))
+        try:
+            with open(credential_path, "r", encoding="utf-8") as fh:
+                client_email = json.load(fh).get("client_email")
+            if client_email:
+                return str(client_email)
+        except Exception:
+            logger.debug("[%s] could not read service account identity for lock", self.name, exc_info=True)
+        return credential_path
 
     async def disconnect(self) -> None:
         self._running = False
