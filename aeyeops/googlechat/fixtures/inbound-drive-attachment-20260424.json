@@ -1,0 +1,31 @@
+{
+  "type": "MESSAGE",
+  "space": {
+    "name": "spaces/EXAMPLE123XYZ",
+    "displayName": "test-room",
+    "spaceType": "SPACE"
+  },
+  "message": {
+    "name": "spaces/EXAMPLE123XYZ/messages/ATTACHDRIVE.ATTACHDRIVE",
+    "sender": {
+      "name": "users/111000000000000000001",
+      "displayName": "Test User",
+      "type": "HUMAN"
+    },
+    "text": "drive file attached",
+    "thread": {
+      "name": "spaces/EXAMPLE123XYZ/threads/THRDRIVE"
+    },
+    "attachment": [
+      {
+        "name": "spaces/EXAMPLE123XYZ/messages/ATTACHDRIVE.ATTACHDRIVE/attachments/A1",
+        "contentName": "drive-doc.pdf",
+        "contentType": "application/pdf",
+        "source": "DRIVE_FILE",
+        "driveDataRef": {
+          "driveFileId": "1exampleDriveFileId"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "type": "MESSAGE",
+  "space": {
+    "name": "spaces/EXAMPLE123XYZ",
+    "displayName": "test-room",
+    "spaceType": "SPACE"
+  },
+  "message": {
+    "name": "spaces/EXAMPLE123XYZ/messages/ATTACHPDF.ATTACHPDF",
+    "sender": {
+      "name": "users/111000000000000000001",
+      "displayName": "Test User",
+      "type": "HUMAN"
+    },
+    "text": "document attached",
+    "thread": {
+      "name": "spaces/EXAMPLE123XYZ/threads/THRPDF"
+    },
+    "attachment": [
+      {
+        "name": "spaces/EXAMPLE123XYZ/messages/ATTACHPDF.ATTACHPDF/attachments/A1",
+        "contentName": "report.pdf",
+        "contentType": "application/pdf",
+        "source": "UPLOADED_CONTENT",
+        "attachmentDataRef": {
+          "resourceName": "spaces/EXAMPLE123XYZ/messages/ATTACHPDF.ATTACHPDF/attachments/A1/media"
+        }
+      }
+    ]
+  }
+}

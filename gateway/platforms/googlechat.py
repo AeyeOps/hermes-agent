@@ -22,15 +22,19 @@ Required env (see aeyeops/googlechat/design.md):
 """
 
 import asyncio
+import io
 import json
 import logging
+import mimetypes
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 try:
     from google.cloud import pubsub_v1  # noqa: F401
     from google.oauth2 import service_account  # noqa: F401
     from googleapiclient import discovery  # noqa: F401
+    from googleapiclient.http import MediaIoBaseDownload  # noqa: F401
 
     GOOGLECHAT_AVAILABLE = True
 except ImportError:
@@ -38,6 +42,7 @@ except ImportError:
     pubsub_v1 = None  # type: ignore[assignment]
     service_account = None  # type: ignore[assignment]
     discovery = None  # type: ignore[assignment]
+    MediaIoBaseDownload = None  # type: ignore[assignment]
 
 # Google's public Chat API reference does not document an explicit limit on
 # the `text` field as of 2026-04-20; the practical ceiling cited by Chat
@@ -67,6 +72,11 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    SUPPORTED_DOCUMENT_TYPES,
+    cache_audio_from_bytes,
+    cache_document_from_bytes,
+    cache_image_from_bytes,
+    cache_video_from_bytes,
     resolve_channel_prompt,
 )
 from gateway.platforms.helpers import MessageDeduplicator
@@ -329,15 +339,138 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self.config.extra or {}, space_name, None
         )
 
+        media_urls, media_types, attachment_message_type = (
+            await self._hydrate_attachments(message.get("attachment") or [])
+        )
+        text = message.get("text") or ""
+        message_type = MessageType.TEXT if text else attachment_message_type
+
         event = MessageEvent(
-            text=message.get("text") or "",
-            message_type=MessageType.TEXT,
+            text=text,
+            message_type=message_type,
             source=source,
             message_id=message_name or None,
             raw_message=payload,
+            media_urls=media_urls,
+            media_types=media_types,
             channel_prompt=channel_prompt,
         )
         await self.handle_message(event)
+
+    async def _hydrate_attachments(
+        self, attachments: list[Dict[str, Any]]
+    ) -> tuple[list[str], list[str], MessageType]:
+        """Download Chat-uploaded attachments into Hermes media caches."""
+        if not attachments:
+            return [], [], MessageType.TEXT
+
+        media_urls: list[str] = []
+        media_types: list[str] = []
+        message_types: list[MessageType] = []
+        loop = asyncio.get_running_loop()
+
+        for attachment in attachments:
+            source = attachment.get("source")
+            if source == "DRIVE_FILE" or attachment.get("driveDataRef"):
+                logger.debug(
+                    "[%s] skipping Drive-backed Chat attachment name=%s",
+                    self.name,
+                    attachment.get("name"),
+                )
+                continue
+
+            data_ref = attachment.get("attachmentDataRef") or {}
+            resource_name = data_ref.get("resourceName")
+            if not resource_name:
+                logger.debug(
+                    "[%s] skipping Chat attachment without attachmentDataRef.resourceName name=%s",
+                    self.name,
+                    attachment.get("name"),
+                )
+                continue
+
+            content_type = _attachment_content_type(attachment)
+            try:
+                data = await loop.run_in_executor(
+                    None, self._download_attachment, resource_name
+                )
+                cached_path, message_type = self._cache_attachment(
+                    data, attachment, content_type
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "[%s] skipping invalid Chat attachment name=%s: %s",
+                    self.name,
+                    attachment.get("name"),
+                    exc,
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[%s] failed to hydrate Chat attachment name=%s resource=%s: %s",
+                    self.name,
+                    attachment.get("name"),
+                    resource_name,
+                    exc,
+                )
+                continue
+
+            if cached_path is None:
+                continue
+
+            media_urls.append(cached_path)
+            media_types.append(content_type or "application/octet-stream")
+            message_types.append(message_type)
+
+        if not message_types:
+            return media_urls, media_types, MessageType.TEXT
+        if len(set(message_types)) == 1:
+            return media_urls, media_types, message_types[0]
+        return media_urls, media_types, MessageType.DOCUMENT
+
+    def _download_attachment(self, resource_name: str) -> bytes:
+        """Download one Chat attachment via media.download."""
+        service = self._ensure_chat_service()
+        if service is None:
+            raise RuntimeError("Google Chat service is not configured")
+        if MediaIoBaseDownload is None:
+            raise RuntimeError("googleapiclient media downloader is unavailable")
+
+        request = service.media().download_media(resourceName=resource_name)
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _status, done = downloader.next_chunk()
+        return buffer.getvalue()
+
+    def _cache_attachment(
+        self,
+        data: bytes,
+        attachment: Dict[str, Any],
+        content_type: str,
+    ) -> tuple[Optional[str], MessageType]:
+        """Cache attachment bytes and return the local path plus message type."""
+        if content_type.startswith("image/"):
+            ext = _extension_from_attachment(attachment, ".jpg")
+            return cache_image_from_bytes(data, ext), MessageType.PHOTO
+        if content_type.startswith("audio/"):
+            ext = _extension_from_attachment(attachment, ".ogg")
+            return cache_audio_from_bytes(data, ext), MessageType.VOICE
+        if content_type.startswith("video/"):
+            ext = _extension_from_attachment(attachment, ".mp4")
+            return cache_video_from_bytes(data, ext), MessageType.VIDEO
+
+        filename = _document_filename_from_attachment(attachment, content_type)
+        if filename is None:
+            logger.debug(
+                "[%s] skipping unsupported Chat document attachment name=%s contentType=%s",
+                self.name,
+                attachment.get("name"),
+                content_type or "<missing>",
+            )
+            return None, MessageType.DOCUMENT
+        return cache_document_from_bytes(data, filename), MessageType.DOCUMENT
 
     # -- Outbound ----------------------------------------------------------
 
@@ -439,6 +572,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             last_response = response
             last_message_id = (response or {}).get("name") or last_message_id
+            if thread_name:
+                response_thread_name = ((response or {}).get("thread") or {}).get(
+                    "name"
+                )
+                if response_thread_name and response_thread_name != thread_name:
+                    logger.warning(
+                        "[%s] Google Chat replied in a different thread than requested "
+                        "requested_thread=%s response_thread=%s message=%s",
+                        self.name,
+                        thread_name,
+                        response_thread_name,
+                        last_message_id,
+                    )
 
         return SendResult(
             success=True,
@@ -464,3 +610,39 @@ def _is_retryable_chat_error(exc: BaseException) -> bool:
         if status == 429 or 500 <= status < 600:
             return True
     return False
+
+
+def _normalize_content_type(content_type: Any) -> str:
+    return str(content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _attachment_content_type(attachment: Dict[str, Any]) -> str:
+    content_type = _normalize_content_type(attachment.get("contentType"))
+    if content_type and content_type != "application/octet-stream":
+        return content_type
+    guessed, _encoding = mimetypes.guess_type(str(attachment.get("contentName") or ""))
+    return _normalize_content_type(guessed) or content_type
+
+
+def _extension_from_attachment(attachment: Dict[str, Any], default_ext: str) -> str:
+    content_name = str(attachment.get("contentName") or "")
+    suffix = Path(content_name).suffix.lower()
+    if suffix:
+        return suffix
+    guessed = mimetypes.guess_extension(_attachment_content_type(attachment))
+    return guessed or default_ext
+
+
+def _document_filename_from_attachment(
+    attachment: Dict[str, Any], content_type: str
+) -> Optional[str]:
+    content_name = str(attachment.get("contentName") or "").strip()
+    suffix = Path(content_name).suffix.lower()
+    if suffix in SUPPORTED_DOCUMENT_TYPES:
+        return content_name
+
+    for ext, mime in SUPPORTED_DOCUMENT_TYPES.items():
+        if content_type == mime:
+            stem = Path(content_name).stem if content_name else "attachment"
+            return f"{stem}{ext}"
+    return None
