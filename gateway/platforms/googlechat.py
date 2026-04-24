@@ -34,7 +34,10 @@ try:
     from google.cloud import pubsub_v1  # noqa: F401
     from google.oauth2 import service_account  # noqa: F401
     from googleapiclient import discovery  # noqa: F401
-    from googleapiclient.http import MediaIoBaseDownload  # noqa: F401
+    from googleapiclient.http import (  # noqa: F401
+        MediaIoBaseDownload,
+        MediaIoBaseUpload,
+    )
 
     GOOGLECHAT_AVAILABLE = True
 except ImportError:
@@ -43,6 +46,7 @@ except ImportError:
     service_account = None  # type: ignore[assignment]
     discovery = None  # type: ignore[assignment]
     MediaIoBaseDownload = None  # type: ignore[assignment]
+    MediaIoBaseUpload = None  # type: ignore[assignment]
 
 # Google's public Chat API reference does not document an explicit limit on
 # the `text` field as of 2026-04-20; the practical ceiling cited by Chat
@@ -64,13 +68,53 @@ GOOGLE_CHAT_MAX_MESSAGE_LENGTH = 4096
 # 429 on the first chunk via the retryable flag returned in SendResult.
 _PER_SPACE_QPS_DELAY_SECONDS = 1.1
 
-CHAT_API_SCOPES = ["https://www.googleapis.com/auth/chat.bot"]
+# Baseline scope — ADR-008, works for send() and media.download.
+CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot"
+
+# Capability-gated scopes per ADR-013. Each requires one-time Workspace admin
+# authorization of the Chat app; until that's granted they'll 403 at runtime.
+# The adapter keeps them off by default so a fresh deployment on chat.bot
+# alone continues to work; enabling a capability widens the scope set only
+# for that feature's flag.
+CHAT_APP_MESSAGES_SCOPE = "https://www.googleapis.com/auth/chat.app.messages"
+CHAT_APP_MESSAGES_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/chat.app.messages.readonly"
+)
+CHAT_APP_SPACES_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/chat.app.spaces.readonly"
+)
+CHAT_APP_MEMBERSHIPS_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/chat.app.memberships.readonly"
+)
+
+CHAT_API_SCOPES = [CHAT_BOT_SCOPE]
+
+# Workspace Events API base URL. The endpoint is distinct from Chat's own
+# REST base, so we build a separate discovery client for it when R1 is on.
+WORKSPACE_EVENTS_API = "workspaceevents"
+WORKSPACE_EVENTS_VERSION = "v1"
+WORKSPACE_EVENTS_MESSAGE_CREATED = "google.workspace.chat.message.v1.created"
+WORKSPACE_EVENTS_DEFAULT_TTL_SECONDS = 24 * 3600
+WORKSPACE_EVENTS_RENEWAL_WINDOW_SECONDS = 3600
+WORKSPACE_EVENTS_RENEWAL_CHECK_SECONDS = 300
+
+# Lifecycle reaction emoji (R3). Defaults chosen to match Discord/Matrix —
+# the enterprise majority — rather than Telegram's 👍/👎. Configurable via
+# env for operators who disagree after dogfood.
+REACTION_EMOJI_PROCESSING = "\U0001f440"  # 👀
+REACTION_EMOJI_SUCCESS = "✅"  # ✅
+REACTION_EMOJI_FAILURE = "❌"  # ❌
+
+# Size cap for in-flight reaction state. One entry per user message currently
+# being processed; 1000 matches MessageDeduplicator's default window.
+REACTION_STATE_MAX_SIZE = 1000
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    ProcessingOutcome,
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
     cache_audio_from_bytes,
@@ -84,6 +128,20 @@ from gateway.platforms.helpers import MessageDeduplicator
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(
+    extra: Dict[str, Any], extra_key: str, env_var: str, default: bool = False
+) -> bool:
+    """Coerce a boolean flag out of config.extra or an env var."""
+    raw = extra.get(extra_key)
+    if raw is None:
+        raw = os.getenv(env_var)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def check_googlechat_requirements(config: Optional[PlatformConfig] = None) -> bool:
     """Return True when SDKs are importable and service-account config exists."""
     if not GOOGLECHAT_AVAILABLE:
@@ -92,6 +150,45 @@ def check_googlechat_requirements(config: Optional[PlatformConfig] = None) -> bo
     if not (extra.get("service_account_json") or os.getenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON")):
         return False
     return True
+
+
+class _SubscriptionRegistry:
+    """In-memory tracking of Workspace Events subscriptions per Chat space.
+
+    Value shape: {space_id: (subscription_name, expire_epoch_seconds)}. The
+    registry is pure bookkeeping — actual subscription mutation goes through
+    the adapter's `_subscribe_space` / `_unsubscribe_space` helpers.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[str, float]] = {}
+
+    def add(self, space_id: str, subscription_name: str, expire_epoch: float) -> None:
+        self._entries[space_id] = (subscription_name, expire_epoch)
+
+    def remove(self, space_id: str) -> Optional[str]:
+        entry = self._entries.pop(space_id, None)
+        return entry[0] if entry else None
+
+    def get(self, space_id: str) -> Optional[tuple[str, float]]:
+        return self._entries.get(space_id)
+
+    def spaces(self) -> list[str]:
+        return list(self._entries.keys())
+
+    def items(self) -> list[tuple[str, str, float]]:
+        return [
+            (space_id, name, expire)
+            for space_id, (name, expire) in self._entries.items()
+        ]
+
+    def needs_renewal_within(self, window_seconds: float, now_epoch: float) -> list[str]:
+        threshold = now_epoch + window_seconds
+        return [
+            space_id
+            for space_id, (_name, expire) in self._entries.items()
+            if expire <= threshold
+        ]
 
 
 class GoogleChatAdapter(BasePlatformAdapter):
@@ -142,6 +239,47 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._pull_future: Any = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._chat_service: Any = None
+
+        # Single gate for every capability that depends on Workspace-admin
+        # approval of chat.app.* scopes (ADR-013): native attachment upload
+        # (R2b), lifecycle reactions API calls (R3), and Workspace Events
+        # subscriptions (R1). Default OFF — a fresh chat.bot deployment
+        # keeps working, and these features are silently no-ops until the
+        # operator flips this flag after admin approval.
+        self._admin_approved: bool = _env_flag(
+            extra,
+            "admin_approved_scopes",
+            "GOOGLECHAT_ADMIN_APPROVED_SCOPES",
+        )
+
+        # Reactions aesthetic preference (independent of auth). Peer parity:
+        # Slack/Discord/Matrix default true; Telegram defaults false; 3/4
+        # majority wins for us. _reactions_enabled() AND-combines this with
+        # _admin_approved so the adapter never 403s the reactions API
+        # because the operator forgot to set the admin-approval flag.
+        self._reactions_preferred: bool = _env_flag(
+            extra, "reactions", "GOOGLECHAT_REACTIONS", default=True
+        )
+
+        # Workspace Events (R1). pubsub_topic is the topic subscriptions
+        # deliver into; required only when _admin_approved is on AND the
+        # operator actually stands up subscriptions.
+        self._pubsub_topic: str = extra.get("pubsub_topic") or os.getenv(
+            "GOOGLECHAT_PUBSUB_TOPIC", ""
+        )
+
+        # Reaction state (R3). Keyed by user message.name; value is the
+        # reactions/* resource name so the in-progress reaction can be
+        # removed when processing completes.
+        self._processing_reactions: dict[str, str] = {}
+
+        # Workspace Events subscription registry (R1). Populated on connect
+        # when _admin_approved is on.
+        self._subscription_registry: "_SubscriptionRegistry" = (
+            _SubscriptionRegistry()
+        )
+        self._renewal_task: Optional[asyncio.Task] = None
+        self._workspace_events_service: Any = None
 
     # -- Connection lifecycle -----------------------------------------------
 
@@ -198,6 +336,21 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._pubsub_subscription,
         )
         self._running = True
+
+        # R1 bootstrap: list spaces the bot is in, subscribe each to
+        # Workspace Events, start the renewal loop. Any failure here is
+        # logged and swallowed — the classic @mention/DM path above is
+        # what the adapter guarantees; R1 is an additive stream.
+        if self._admin_approved:
+            try:
+                await self._bootstrap_workspace_events()
+            except Exception:
+                logger.exception(
+                    "[%s] Workspace Events bootstrap failed; continuing "
+                    "on Pub/Sub-only path",
+                    self.name,
+                )
+
         return True
 
     def _credential_lock_identity(self) -> str:
@@ -214,6 +367,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
+        if self._renewal_task is not None:
+            self._renewal_task.cancel()
+            try:
+                await self._renewal_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._renewal_task = None
         if self._pull_future is not None:
             try:
                 self._pull_future.cancel()
@@ -264,13 +424,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             message.nack()
 
     async def _handle_chat_event(self, payload: Dict[str, Any]) -> None:
-        """Route a decoded Chat event payload by type."""
-        # Chat's App Event envelope nests the legacy fields under
-        # payload["chat"]["messagePayload"]. Unwrap so the routing below
-        # works against both the legacy and current shapes.
-        message_payload = (payload.get("chat") or {}).get("messagePayload")
-        if message_payload:
-            payload = message_payload
+        """Route a decoded Chat event payload by type.
+
+        Handles three envelope shapes:
+          * legacy direct Pub/Sub push (top-level `message` + `space`)
+          * Chat App Event envelope (`chat.messagePayload` wraps legacy shape)
+          * Workspace Events API delivery (CloudEvents-shaped — has `@type`
+            or `ce-type`, message resource nested under `message`)
+        """
+        payload = _normalize_chat_envelope(payload)
 
         event_type = payload.get("type") or payload.get("eventType")
         # App Event envelope doesn't carry an eventType string — infer
@@ -280,14 +442,20 @@ class GoogleChatAdapter(BasePlatformAdapter):
             event_type = "MESSAGE"
         if event_type == "MESSAGE":
             await self._handle_message_event(payload)
-        elif event_type in ("ADDED_TO_SPACE", "REMOVED_FROM_SPACE"):
-            # TODO M2 C14: lifecycle handling (space-metadata cache / invalidate)
+        elif event_type == "ADDED_TO_SPACE":
+            space_name = (payload.get("space") or {}).get("name")
             logger.info(
-                "[%s] lifecycle event=%s space=%s",
-                self.name,
-                event_type,
-                (payload.get("space") or {}).get("name"),
+                "[%s] lifecycle event=%s space=%s", self.name, event_type, space_name
             )
+            if space_name and self._admin_approved:
+                await self._subscribe_space_if_needed(space_name)
+        elif event_type == "REMOVED_FROM_SPACE":
+            space_name = (payload.get("space") or {}).get("name")
+            logger.info(
+                "[%s] lifecycle event=%s space=%s", self.name, event_type, space_name
+            )
+            if space_name and self._admin_approved:
+                await self._unsubscribe_space_if_needed(space_name)
         elif event_type == "CARD_CLICKED":
             # TODO M4 C24: synthesize MessageEvent(TEXT) per ADR-012
             logger.debug(
@@ -297,6 +465,234 @@ class GoogleChatAdapter(BasePlatformAdapter):
         else:
             logger.debug(
                 "[%s] ignoring event type=%r", self.name, event_type
+            )
+
+    # -- Workspace Events (R1) --------------------------------------------
+
+    async def _bootstrap_workspace_events(self) -> None:
+        """Enumerate bot's spaces, create subscriptions, start renewal loop."""
+        if not self._pubsub_topic:
+            logger.warning(
+                "[%s] skipping Workspace Events bootstrap: "
+                "GOOGLECHAT_PUBSUB_TOPIC not set",
+                self.name,
+            )
+            return
+
+        try:
+            spaces = await self._list_bot_spaces()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] failed to list bot spaces; Workspace Events idle: %s",
+                self.name,
+                exc,
+            )
+            return
+
+        for space_id in spaces:
+            try:
+                await self._subscribe_space_if_needed(space_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[%s] failed to subscribe space=%s: %s",
+                    self.name,
+                    space_id,
+                    exc,
+                )
+
+        if self._renewal_task is None or self._renewal_task.done():
+            self._renewal_task = asyncio.create_task(
+                self._renew_subscriptions_loop(),
+                name=f"{self.name}-we-renewal",
+            )
+
+    async def _list_bot_spaces(self) -> list[str]:
+        """List every Chat space the bot is a member of.
+
+        Uses spaces.list with filter `spaceType = "SPACE" OR spaceType = "GROUP_CHAT"`;
+        DMs are excluded because mention-free listening there is moot.
+        """
+        service = self._ensure_chat_service()
+        if service is None:
+            return []
+        loop = asyncio.get_running_loop()
+
+        def _list() -> list[str]:
+            spaces: list[str] = []
+            page_token: Optional[str] = None
+            while True:
+                kwargs: Dict[str, Any] = {
+                    "pageSize": 100,
+                    "filter": 'spaceType = "SPACE" OR spaceType = "GROUP_CHAT"',
+                }
+                if page_token:
+                    kwargs["pageToken"] = page_token
+                resp = service.spaces().list(**kwargs).execute() or {}
+                for space in resp.get("spaces") or []:
+                    name = space.get("name")
+                    if name:
+                        spaces.append(name)
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
+            return spaces
+
+        return await loop.run_in_executor(None, _list)
+
+    async def _subscribe_space_if_needed(self, space_id: str) -> None:
+        if self._subscription_registry.get(space_id) is not None:
+            return
+        await self._subscribe_space(space_id)
+
+    async def _subscribe_space(self, space_id: str) -> None:
+        """Create a Workspace Events subscription for `space_id`.
+
+        Uses the MESSAGE_CREATED event type and `includeResource=true` so
+        the payload carries the full message body (no second fetch).
+        """
+        service = self._ensure_workspace_events_service()
+        if service is None:
+            return
+
+        body = {
+            "targetResource": _space_target_resource(space_id),
+            "eventTypes": [WORKSPACE_EVENTS_MESSAGE_CREATED],
+            "notificationEndpoint": {"pubsubTopic": self._pubsub_topic},
+            "payloadOptions": {"includeResource": True},
+            "ttl": f"{WORKSPACE_EVENTS_DEFAULT_TTL_SECONDS}s",
+        }
+        loop = asyncio.get_running_loop()
+
+        def _create() -> Dict[str, Any]:
+            op = service.subscriptions().create(body=body).execute() or {}
+            # Subscriptions are created through a long-running operation; for
+            # simplicity we block on the returned operation if any.
+            if op.get("done"):
+                return op.get("response") or {}
+            name = op.get("name")
+            while name:
+                op = service.operations().get(name=name).execute() or {}
+                if op.get("done"):
+                    if op.get("error"):
+                        raise RuntimeError(
+                            f"subscription create failed: {op['error']}"
+                        )
+                    return op.get("response") or {}
+            return {}
+
+        try:
+            response = await loop.run_in_executor(None, _create)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] subscription create rejected for space=%s: %s",
+                self.name,
+                space_id,
+                exc,
+            )
+            return
+
+        subscription_name = response.get("name")
+        expire_time = response.get("expireTime")
+        expire_epoch = _parse_iso_epoch(expire_time) or (
+            asyncio.get_event_loop().time() + WORKSPACE_EVENTS_DEFAULT_TTL_SECONDS
+        )
+        if subscription_name:
+            self._subscription_registry.add(
+                space_id, subscription_name, expire_epoch
+            )
+            logger.info(
+                "[%s] subscribed space=%s subscription=%s expires=%s",
+                self.name,
+                space_id,
+                subscription_name,
+                expire_time,
+            )
+
+    async def _unsubscribe_space_if_needed(self, space_id: str) -> None:
+        name = self._subscription_registry.remove(space_id)
+        if not name:
+            return
+        service = self._ensure_workspace_events_service()
+        if service is None:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: service.subscriptions().delete(name=name).execute(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] failed to delete subscription=%s: %s",
+                self.name,
+                name,
+                exc,
+            )
+
+    async def _renew_subscriptions_loop(self) -> None:
+        """Background task: patch TTL on any subscription within the renewal window."""
+        try:
+            while self._running:
+                try:
+                    await self._renew_expiring_subscriptions()
+                except Exception:
+                    logger.exception(
+                        "[%s] renewal loop iteration failed", self.name
+                    )
+                await asyncio.sleep(WORKSPACE_EVENTS_RENEWAL_CHECK_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+    async def _renew_expiring_subscriptions(self) -> None:
+        import time
+
+        now_epoch = time.time()
+        expiring = self._subscription_registry.needs_renewal_within(
+            WORKSPACE_EVENTS_RENEWAL_WINDOW_SECONDS, now_epoch
+        )
+        if not expiring:
+            return
+
+        service = self._ensure_workspace_events_service()
+        if service is None:
+            return
+        loop = asyncio.get_running_loop()
+
+        for space_id in expiring:
+            entry = self._subscription_registry.get(space_id)
+            if not entry:
+                continue
+            subscription_name, _ = entry
+
+            def _patch(name: str = subscription_name) -> Dict[str, Any]:
+                return (
+                    service.subscriptions()
+                    .patch(
+                        name=name,
+                        updateMask="ttl",
+                        body={"ttl": f"{WORKSPACE_EVENTS_DEFAULT_TTL_SECONDS}s"},
+                    )
+                    .execute()
+                    or {}
+                )
+
+            try:
+                response = await loop.run_in_executor(None, _patch)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[%s] renewal patch failed space=%s name=%s: %s",
+                    self.name,
+                    space_id,
+                    subscription_name,
+                    exc,
+                )
+                continue
+
+            new_expire = _parse_iso_epoch(response.get("expireTime")) or (
+                now_epoch + WORKSPACE_EVENTS_DEFAULT_TTL_SECONDS
+            )
+            self._subscription_registry.add(
+                space_id, subscription_name, new_expire
             )
 
     async def _handle_message_event(self, payload: Dict[str, Any]) -> None:
@@ -474,6 +870,30 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     # -- Outbound ----------------------------------------------------------
 
+    def _compute_scopes(self) -> list[str]:
+        """Return the OAuth scope list the adapter should request.
+
+        Widens only when the operator has confirmed Workspace-admin approval
+        of the chat.app.* family (ADR-013). Without that confirmation we
+        stay on chat.bot so send/read continue to work unchanged.
+        """
+        if not self._admin_approved:
+            return [CHAT_BOT_SCOPE]
+        return [
+            CHAT_BOT_SCOPE,
+            CHAT_APP_MESSAGES_SCOPE,
+            CHAT_APP_MESSAGES_READONLY_SCOPE,
+            CHAT_APP_SPACES_READONLY_SCOPE,
+            CHAT_APP_MEMBERSHIPS_READONLY_SCOPE,
+        ]
+
+    def _reactions_enabled(self) -> bool:
+        """Lifecycle reactions fire only when the operator both prefers them
+        and has admin-approved the chat.app.* scope that authorizes the
+        reactions API. AND-combining keeps the feature fail-closed against
+        misconfiguration (preferred=true with scopes missing would 403)."""
+        return self._admin_approved and self._reactions_preferred
+
     def _ensure_chat_service(self) -> Any:
         """Lazily build the Chat REST discovery client using SA credentials.
 
@@ -489,7 +909,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return None
         try:
             creds = service_account.Credentials.from_service_account_file(
-                self._service_account_path, scopes=CHAT_API_SCOPES
+                self._service_account_path, scopes=self._compute_scopes()
             )
             self._chat_service = discovery.build(
                 "chat", "v1", credentials=creds, cache_discovery=False
@@ -498,6 +918,33 @@ class GoogleChatAdapter(BasePlatformAdapter):
             logger.exception("[%s] failed to build Chat REST client", self.name)
             return None
         return self._chat_service
+
+    def _ensure_workspace_events_service(self) -> Any:
+        """Build the Workspace Events discovery client on demand (R1 only)."""
+        if self._workspace_events_service is not None:
+            return self._workspace_events_service
+        if not self._admin_approved:
+            return None
+        if not GOOGLECHAT_AVAILABLE:
+            return None
+        if not self._service_account_path:
+            return None
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                self._service_account_path, scopes=self._compute_scopes()
+            )
+            self._workspace_events_service = discovery.build(
+                WORKSPACE_EVENTS_API,
+                WORKSPACE_EVENTS_VERSION,
+                credentials=creds,
+                cache_discovery=False,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] failed to build Workspace Events REST client", self.name
+            )
+            return None
+        return self._workspace_events_service
 
     async def send(
         self,
@@ -593,8 +1040,516 @@ class GoogleChatAdapter(BasePlatformAdapter):
             retryable=False,
         )
 
+    # -- Outbound media upload (R2b) ---------------------------------------
+
+    def _upload_attachment(
+        self,
+        space_id: str,
+        data: bytes,
+        filename: str,
+    ) -> Dict[str, Any]:
+        """POST to chat.googleapis.com/upload/v1/{space}/attachments:upload.
+
+        Returns the attachmentDataRef dict that a follow-up
+        spaces.messages.create call references to actually attach the
+        uploaded bytes. Requires chat.app.messages scope (ADR-013).
+        """
+        if not self._admin_approved:
+            raise RuntimeError(
+                "native upload requires GOOGLECHAT_ADMIN_APPROVED_SCOPES "
+                "after Workspace admin approves chat.app.messages"
+            )
+        service = self._ensure_chat_service()
+        if service is None:
+            raise RuntimeError("Google Chat service is not configured")
+        if MediaIoBaseUpload is None:
+            raise RuntimeError("googleapiclient media uploader is unavailable")
+
+        content_type, _ = mimetypes.guess_type(filename)
+        media_body = MediaIoBaseUpload(
+            io.BytesIO(data),
+            mimetype=content_type or "application/octet-stream",
+            resumable=False,
+        )
+        response = (
+            service.media()
+            .upload(
+                parent=space_id,
+                body={"filename": filename},
+                media_body=media_body,
+            )
+            .execute()
+        )
+        ref = (response or {}).get("attachmentDataRef") or {}
+        if not ref.get("resourceName") and not ref.get("attachmentUploadToken"):
+            raise RuntimeError(
+                f"upload response missing attachmentDataRef: {response!r}"
+            )
+        return ref
+
+    async def _send_native_attachment(
+        self,
+        chat_id: str,
+        local_path: Optional[str],
+        bytes_payload: Optional[bytes],
+        filename: Optional[str],
+        caption: Optional[str],
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        """Two-step upload + messages.create; shared code for all send_* overrides."""
+        if not self._admin_approved:
+            # Scope expansion not yet confirmed — fall back to the base class
+            # URL-as-text path so the adapter stays useful pre-ADR-013.
+            raise _NativeUploadUnavailable()
+
+        # Materialize bytes + filename from whichever of the two arg shapes
+        # the caller used. send_image(url=…) passes bytes=None and we fall
+        # back to fetching the URL up front; send_image_file/_voice/_video/_document
+        # pass a local path.
+        resolved_filename = filename
+        data: bytes
+        if bytes_payload is not None:
+            data = bytes_payload
+            if not resolved_filename:
+                resolved_filename = "upload.bin"
+        elif local_path is not None:
+            try:
+                path = Path(local_path)
+                data = path.read_bytes()
+            except FileNotFoundError:
+                return SendResult(
+                    success=False,
+                    error=f"File not found: {local_path}",
+                    retryable=False,
+                )
+            if not resolved_filename:
+                resolved_filename = path.name
+        else:
+            return SendResult(
+                success=False,
+                error="send_* native upload: no source bytes or path",
+                retryable=False,
+            )
+
+        loop = asyncio.get_running_loop()
+        try:
+            ref = await loop.run_in_executor(
+                None, self._upload_attachment, chat_id, data, resolved_filename
+            )
+        except Exception as exc:  # noqa: BLE001
+            retryable = _is_retryable_chat_error(exc)
+            logger.warning(
+                "[%s] attachment upload failed chat_id=%s filename=%s retryable=%s: %s",
+                self.name,
+                chat_id,
+                resolved_filename,
+                retryable,
+                exc,
+            )
+            return SendResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=retryable,
+            )
+
+        body: Dict[str, Any] = {"attachment": [{"attachmentDataRef": ref}]}
+        if caption:
+            body["text"] = self.format_message(caption)
+        thread_name = (metadata or {}).get("thread_id")
+        if thread_name:
+            body["thread"] = {"name": thread_name}
+
+        service = self._ensure_chat_service()
+        if service is None:
+            return SendResult(
+                success=False,
+                error="Google Chat service is not configured",
+                retryable=False,
+            )
+
+        def _create() -> Any:
+            kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
+            if thread_name:
+                kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+            return (
+                service.spaces().messages().create(**kwargs).execute()
+            )
+
+        try:
+            response = await loop.run_in_executor(None, _create)
+        except Exception as exc:  # noqa: BLE001
+            retryable = _is_retryable_chat_error(exc)
+            logger.warning(
+                "[%s] attachment send failed chat_id=%s filename=%s retryable=%s: %s",
+                self.name,
+                chat_id,
+                resolved_filename,
+                retryable,
+                exc,
+            )
+            return SendResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=retryable,
+            )
+
+        return SendResult(
+            success=True,
+            message_id=(response or {}).get("name"),
+            raw_response=response,
+            retryable=False,
+        )
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if not self._admin_approved:
+            return await super().send_image(
+                chat_id=chat_id,
+                image_url=image_url,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(image_url)
+                response.raise_for_status()
+                data = response.content
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] could not fetch image_url=%s; falling back to text: %s",
+                self.name,
+                image_url,
+                exc,
+            )
+            return await super().send_image(
+                chat_id=chat_id,
+                image_url=image_url,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+
+        filename = Path(image_url.split("?", 1)[0]).name or "image.bin"
+        try:
+            return await self._send_native_attachment(
+                chat_id=chat_id,
+                local_path=None,
+                bytes_payload=data,
+                filename=filename,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except _NativeUploadUnavailable:
+            return await super().send_image(
+                chat_id=chat_id,
+                image_url=image_url,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        metadata = kwargs.get("metadata")
+        try:
+            return await self._send_native_attachment(
+                chat_id=chat_id,
+                local_path=image_path,
+                bytes_payload=None,
+                filename=None,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except _NativeUploadUnavailable:
+            return await super().send_image_file(
+                chat_id=chat_id,
+                image_path=image_path,
+                caption=caption,
+                reply_to=reply_to,
+                **kwargs,
+            )
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        metadata = kwargs.get("metadata")
+        try:
+            return await self._send_native_attachment(
+                chat_id=chat_id,
+                local_path=audio_path,
+                bytes_payload=None,
+                filename=None,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except _NativeUploadUnavailable:
+            return await super().send_voice(
+                chat_id=chat_id,
+                audio_path=audio_path,
+                caption=caption,
+                reply_to=reply_to,
+                **kwargs,
+            )
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        metadata = kwargs.get("metadata")
+        try:
+            return await self._send_native_attachment(
+                chat_id=chat_id,
+                local_path=video_path,
+                bytes_payload=None,
+                filename=None,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except _NativeUploadUnavailable:
+            return await super().send_video(
+                chat_id=chat_id,
+                video_path=video_path,
+                caption=caption,
+                reply_to=reply_to,
+                **kwargs,
+            )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        metadata = kwargs.get("metadata")
+        try:
+            return await self._send_native_attachment(
+                chat_id=chat_id,
+                local_path=file_path,
+                bytes_payload=None,
+                filename=file_name,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except _NativeUploadUnavailable:
+            return await super().send_document(
+                chat_id=chat_id,
+                file_path=file_path,
+                caption=caption,
+                file_name=file_name,
+                reply_to=reply_to,
+                **kwargs,
+            )
+
+    # -- Lifecycle reactions (R3) ------------------------------------------
+
+    def _set_reaction(self, message_name: str, emoji_unicode: str) -> Optional[str]:
+        """Create a reaction on a Chat message; returns reactions/* resource name."""
+        service = self._ensure_chat_service()
+        if service is None:
+            return None
+        response = (
+            service.spaces()
+            .messages()
+            .reactions()
+            .create(
+                parent=message_name,
+                body={"emoji": {"unicode": emoji_unicode}},
+            )
+            .execute()
+        )
+        return (response or {}).get("name")
+
+    def _remove_reaction(self, reaction_name: str) -> None:
+        service = self._ensure_chat_service()
+        if service is None:
+            return
+        service.spaces().messages().reactions().delete(
+            name=reaction_name
+        ).execute()
+
+    def _remember_reaction(self, message_name: str, reaction_name: str) -> None:
+        """Cap the reaction state dict the same way MessageDeduplicator caps."""
+        if len(self._processing_reactions) >= REACTION_STATE_MAX_SIZE:
+            # Evict oldest insertion (Python dicts preserve insertion order).
+            oldest = next(iter(self._processing_reactions))
+            self._processing_reactions.pop(oldest, None)
+        self._processing_reactions[message_name] = reaction_name
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        if not self._reactions_enabled():
+            return
+        message_id = getattr(event, "message_id", None)
+        if not message_id:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            reaction_name = await loop.run_in_executor(
+                None,
+                self._set_reaction,
+                message_id,
+                REACTION_EMOJI_PROCESSING,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] failed to set processing reaction on %s: %s",
+                self.name,
+                message_id,
+                exc,
+            )
+            return
+        if reaction_name:
+            self._remember_reaction(message_id, reaction_name)
+
+    async def on_processing_complete(
+        self, event: MessageEvent, outcome: ProcessingOutcome
+    ) -> None:
+        if not self._reactions_enabled():
+            return
+        message_id = getattr(event, "message_id", None)
+        if not message_id:
+            return
+        reaction_name = self._processing_reactions.pop(message_id, None)
+        loop = asyncio.get_running_loop()
+        if reaction_name:
+            try:
+                await loop.run_in_executor(
+                    None, self._remove_reaction, reaction_name
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[%s] failed to remove processing reaction on %s: %s",
+                    self.name,
+                    message_id,
+                    exc,
+                )
+
+        if outcome == ProcessingOutcome.CANCELLED:
+            return
+
+        emoji = (
+            REACTION_EMOJI_SUCCESS
+            if outcome == ProcessingOutcome.SUCCESS
+            else REACTION_EMOJI_FAILURE
+        )
+        try:
+            await loop.run_in_executor(
+                None, self._set_reaction, message_id, emoji
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] failed to set completion reaction on %s: %s",
+                self.name,
+                message_id,
+                exc,
+            )
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         raise NotImplementedError("get_chat_info() lands with space lookup support")
+
+
+class _NativeUploadUnavailable(RuntimeError):
+    """Raised internally to trigger base-class URL-as-text fallback in send_*.
+
+    Distinct from plain RuntimeError so the send_* overrides can catch it
+    narrowly without swallowing other upload errors that should surface.
+    """
+
+
+def _normalize_chat_envelope(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten whichever envelope Chat or Workspace Events delivered.
+
+    Three shapes are expected in the wild:
+      1. Legacy direct delivery: top-level `message`, `space`, `type`.
+      2. Chat App Events: `payload["chat"]["messagePayload"]` wraps
+         shape 1.
+      3. Workspace Events API: CloudEvents-shaped. The payload either
+         has an `@type` like
+         `type.googleapis.com/google.chat.v1.MessageCreatedEventData`,
+         or uses `data.message` as the nested Chat message resource.
+
+    Returns a dict in shape 1.
+    """
+    if not isinstance(payload, dict):
+        return payload or {}
+
+    # Shape 2: Chat App Events envelope.
+    message_payload = (payload.get("chat") or {}).get("messagePayload")
+    if isinstance(message_payload, dict):
+        return message_payload
+
+    # Shape 3: Workspace Events API — the MessageCreatedEventData schema
+    # puts the Chat Message under `message`. Recognize by any of:
+    #   * `@type` starting with google.chat.*
+    #   * a top-level `subscription` field (every WE delivery carries it)
+    at_type = str(payload.get("@type") or "")
+    has_subscription = "subscription" in payload
+    if at_type.startswith("type.googleapis.com/google.chat") or has_subscription:
+        # Some WE deliveries nest the actual event data under `data`.
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else None
+        projected = data if data else payload
+        return {
+            "type": "MESSAGE",
+            "message": projected.get("message") or {},
+            "space": projected.get("space")
+            or (projected.get("message") or {}).get("space")
+            or {},
+        }
+
+    return payload
+
+
+def _space_target_resource(space_id: str) -> str:
+    """Format a space resource name as a Workspace Events target URL."""
+    if space_id.startswith("//chat.googleapis.com/"):
+        return space_id
+    return f"//chat.googleapis.com/{space_id}"
+
+
+def _parse_iso_epoch(value: Any) -> Optional[float]:
+    """Parse an RFC 3339 / ISO 8601 string into POSIX epoch seconds."""
+    if not value:
+        return None
+    import datetime as _dt
+
+    try:
+        text = str(value).replace("Z", "+00:00")
+        dt = _dt.datetime.fromisoformat(text)
+        return dt.timestamp()
+    except Exception:
+        return None
 
 
 def _is_retryable_chat_error(exc: BaseException) -> bool:
