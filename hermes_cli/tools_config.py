@@ -910,6 +910,13 @@ def _get_platform_tools(
             enabled_toolsets.add(ts_key)
             claimed.update(ts_tools)
 
+    # Preserve platform-specific tools that are direct members of a platform
+    # composite, such as send_chat_card in hermes-googlechat.  Add them as
+    # explicit tool names so a saved platform config does not re-enable every
+    # core tool from the composite.
+    direct_platform_tools = sorted(platform_tool_universe - configurable_tool_universe - claimed)
+    enabled_toolsets.update(direct_platform_tools)
+
     # Plugin toolsets: enabled by default unless explicitly disabled, or
     # unless the toolset is in _DEFAULT_OFF_TOOLSETS (e.g. spotify —
     # shipped as a bundled plugin but user must opt in via `hermes tools`
