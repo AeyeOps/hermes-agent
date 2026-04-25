@@ -27,6 +27,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -109,6 +110,9 @@ REACTION_EMOJI_FAILURE = "❌"  # ❌
 # being processed; 1000 matches MessageDeduplicator's default window.
 REACTION_STATE_MAX_SIZE = 1000
 
+GOOGLECHAT_PLACEHOLDER_TEXT = "Working..."
+GOOGLECHAT_PLACEHOLDER_STOPPED_TEXT = "Stopped."
+
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -126,6 +130,34 @@ from gateway.platforms.base import (
 from gateway.platforms.helpers import MessageDeduplicator
 
 logger = logging.getLogger(__name__)
+
+_MARKDOWN_CODE_BLOCK_RE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`)")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+_MARKDOWN_HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*([^*\n][\s\S]*?[^*\n])\*\*")
+_MARKDOWN_STRIKE_RE = re.compile(r"~~([^~\n][\s\S]*?[^~\n])~~")
+
+
+def format_googlechat_markdown(content: str) -> str:
+    """Translate common Markdown into Google Chat's limited text markup."""
+    if not content:
+        return content
+
+    protected: list[str] = []
+
+    def _protect(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"\x00GC{len(protected) - 1}\x00"
+
+    text = _MARKDOWN_CODE_BLOCK_RE.sub(_protect, content)
+    text = _MARKDOWN_LINK_RE.sub(lambda m: f"<{m.group(2)}|{m.group(1)}>", text)
+    text = _MARKDOWN_HEADER_RE.sub(lambda m: f"*{m.group(2).strip()}*", text)
+    text = _MARKDOWN_BOLD_RE.sub(lambda m: f"*{m.group(1)}*", text)
+    text = _MARKDOWN_STRIKE_RE.sub(lambda m: f"~{m.group(1)}~", text)
+
+    for idx, value in enumerate(protected):
+        text = text.replace(f"\x00GC{idx}\x00", value)
+    return text
 
 
 def _env_flag(
@@ -194,9 +226,9 @@ class _SubscriptionRegistry:
 class GoogleChatAdapter(BasePlatformAdapter):
     """Google Chat (Workspace) adapter — Pub/Sub pull inbound, Chat REST outbound.
 
-    C6 state: inbound MESSAGE normalized + dispatched; ADDED/REMOVED/CARD_CLICKED
-    ack'd but not surfaced (lifecycle lands in C14, cards in C24). send() lands
-    in C8.
+    C6+ state: inbound MESSAGE normalized + dispatched; lifecycle events update
+    Workspace Events subscriptions when approved; CARD_CLICKED is synthesized as
+    a normal text turn. send() and text-first edit streaming use Chat REST.
     """
 
     def __init__(self, config: PlatformConfig):
@@ -280,6 +312,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         self._renewal_task: Optional[asyncio.Task] = None
         self._workspace_events_service: Any = None
+        self._typing_placeholders: dict[tuple[str, Optional[str]], str] = {}
+        self._last_write_time: dict[tuple[str, Optional[str]], float] = {}
 
     # -- Connection lifecycle -----------------------------------------------
 
@@ -457,11 +491,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if space_name and self._admin_approved:
                 await self._unsubscribe_space_if_needed(space_name)
         elif event_type == "CARD_CLICKED":
-            # TODO M4 C24: synthesize MessageEvent(TEXT) per ADR-012
-            logger.debug(
-                "[%s] CARD_CLICKED received (synthesis lands in C24)",
-                self.name,
-            )
+            await self._handle_card_clicked_event(payload)
         else:
             logger.debug(
                 "[%s] ignoring event type=%r", self.name, event_type
@@ -753,6 +783,55 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         await self.handle_message(event)
 
+    async def _handle_card_clicked_event(self, payload: Dict[str, Any]) -> None:
+        synthesized = _synthesize_card_click_text(payload)
+        if not synthesized:
+            logger.debug("[%s] CARD_CLICKED ignored without action context", self.name)
+            return
+
+        message = payload.get("message") or {}
+        message_name = message.get("name", "") or ""
+        dedup_key = f"{message_name}:card_click:{synthesized}" if message_name else ""
+        if dedup_key and self._dedup.is_duplicate(dedup_key):
+            return
+
+        user = payload.get("user") or message.get("sender") or {}
+        space = payload.get("space") or {}
+        thread = message.get("thread") or {}
+        thread_name = thread.get("name") or None
+        space_name = space.get("name", "") or ""
+        space_type_raw = space.get("spaceType") or space.get("type") or ""
+        chat_type = "dm" if space_type_raw in ("DM", "DIRECT_MESSAGE") else "group"
+
+        source = self.build_source(
+            chat_id=space_name,
+            chat_name=space.get("displayName") or None,
+            chat_type=chat_type,
+            user_id=user.get("name") or None,
+            user_name=user.get("displayName") or None,
+            thread_id=thread_name,
+        )
+        channel_prompt = resolve_channel_prompt(
+            self.config.extra or {}, space_name, None
+        )
+        logger.info(
+            "[%s] CARD_CLICKED synthesized action=%s params=%d selections=%d",
+            self.name,
+            _card_click_action_name(payload) or "<unknown>",
+            len(_card_click_parameters(payload)),
+            len(_card_click_form_inputs(payload)),
+        )
+        await self.handle_message(
+            MessageEvent(
+                text=synthesized,
+                message_type=MessageType.TEXT,
+                source=source,
+                message_id=message_name or None,
+                raw_message=payload,
+                channel_prompt=channel_prompt,
+            )
+        )
+
     async def _hydrate_attachments(
         self, attachments: list[Dict[str, Any]]
     ) -> tuple[list[str], list[str], MessageType]:
@@ -946,6 +1025,106 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return None
         return self._workspace_events_service
 
+    def format_message(self, content: str) -> str:
+        return format_googlechat_markdown(content)
+
+    @staticmethod
+    def _thread_name(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+        return (metadata or {}).get("thread_id")
+
+    @staticmethod
+    def _write_key(chat_id: str, thread_name: Optional[str]) -> tuple[str, Optional[str]]:
+        return chat_id, thread_name
+
+    async def _pace_write(self, key: tuple[str, Optional[str]]) -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        last = self._last_write_time.get(key)
+        if last is not None:
+            delay = _PER_SPACE_QPS_DELAY_SECONDS - (now - last)
+            if delay > 0:
+                logger.debug(
+                    "[%s] pacing Google Chat write by %.2fs target=%s",
+                    self.name,
+                    delay,
+                    key[0],
+                )
+                await asyncio.sleep(delay)
+        self._last_write_time[key] = loop.time()
+
+    async def _create_message(
+        self,
+        chat_id: str,
+        body: Dict[str, Any],
+        thread_name: Optional[str],
+        write_key: tuple[str, Optional[str]],
+    ) -> Any:
+        service = self._ensure_chat_service()
+        if service is None:
+            raise RuntimeError("Google Chat service is not configured")
+        await self._pace_write(write_key)
+        loop = asyncio.get_running_loop()
+
+        def _execute() -> Any:
+            kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
+            if thread_name:
+                kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+            return service.spaces().messages().create(**kwargs).execute()
+
+        return await loop.run_in_executor(None, _execute)
+
+    async def _patch_message_text(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        write_key: tuple[str, Optional[str]],
+    ) -> SendResult:
+        service = self._ensure_chat_service()
+        if service is None:
+            return SendResult(
+                success=False,
+                error="Google Chat service is not configured",
+                retryable=False,
+            )
+
+        formatted = self.format_message(content)
+        await self._pace_write(write_key)
+        loop = asyncio.get_running_loop()
+
+        def _execute() -> Any:
+            body = {"name": message_id, "text": formatted}
+            return (
+                service.spaces()
+                .messages()
+                .patch(name=message_id, updateMask="text", body=body)
+                .execute()
+            )
+
+        try:
+            response = await loop.run_in_executor(None, _execute)
+        except Exception as exc:  # noqa: BLE001
+            retryable = _is_retryable_chat_error(exc)
+            logger.warning(
+                "[%s] edit failed chat_id=%s message=%s retryable=%s: %s",
+                self.name,
+                chat_id,
+                message_id,
+                retryable,
+                exc,
+            )
+            return SendResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=retryable,
+            )
+        return SendResult(
+            success=True,
+            message_id=(response or {}).get("name") or message_id,
+            raw_response=response,
+            retryable=False,
+        )
+
     async def send(
         self,
         chat_id: str,
@@ -966,38 +1145,41 @@ class GoogleChatAdapter(BasePlatformAdapter):
             formatted, max_length=self._max_message_length
         )
 
-        thread_name = (metadata or {}).get("thread_id")
+        thread_name = self._thread_name(metadata)
+        write_key = self._write_key(chat_id, thread_name)
+        placeholder_id = self._typing_placeholders.pop(write_key, None)
         last_response: Any = None
         last_message_id: Optional[str] = None
-        loop = asyncio.get_running_loop()
 
         for index, chunk in enumerate(chunks):
-            if index > 0:
-                # Respect Google Chat's per-space 1-write/sec cap so chunk N
-                # doesn't 429 on chunk N-1's own heels.
-                await asyncio.sleep(_PER_SPACE_QPS_DELAY_SECONDS)
-
-            body: Dict[str, Any] = {"text": chunk}
-            if thread_name:
-                body["thread"] = {"name": thread_name}
-
-            def _execute() -> Any:
-                kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
-                if thread_name:
-                    # Chat API v1 only threads the reply when messageReplyOption
-                    # is set; otherwise body["thread"]["name"] is ignored and
-                    # every reply starts a new thread, which breaks mention-free
-                    # follow-ups in group spaces.
-                    kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
-                return (
-                    service.spaces()
-                    .messages()
-                    .create(**kwargs)
-                    .execute()
-                )
-
             try:
-                response = await loop.run_in_executor(None, _execute)
+                if index == 0 and placeholder_id:
+                    result = await self._patch_message_text(
+                        chat_id, placeholder_id, chunk, write_key
+                    )
+                    if not result.success:
+                        logger.warning(
+                            "[%s] placeholder edit failed; not creating fallback message: %s",
+                            self.name,
+                            result.error,
+                        )
+                        return result
+                    response = result.raw_response
+                    last_response = response
+                    last_message_id = result.message_id
+                    logger.debug(
+                        "[%s] finalized Google Chat placeholder message=%s",
+                        self.name,
+                        last_message_id,
+                    )
+                    continue
+
+                body: Dict[str, Any] = {"text": chunk}
+                if thread_name:
+                    body["thread"] = {"name": thread_name}
+                response = await self._create_message(
+                    chat_id, body, thread_name, write_key
+                )
             except Exception as exc:  # noqa: BLE001
                 # If we've already posted earlier chunks, force non-retryable
                 # so the base class's _send_with_retry doesn't duplicate them.
@@ -1039,6 +1221,105 @@ class GoogleChatAdapter(BasePlatformAdapter):
             raw_response=last_response,
             retryable=False,
         )
+
+    async def send_card(
+        self,
+        chat_id: str,
+        card: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        thread_name = self._thread_name(metadata)
+        write_key = self._write_key(chat_id, thread_name)
+        body: Dict[str, Any] = {"cardsV2": [card]}
+        if thread_name:
+            body["thread"] = {"name": thread_name}
+        try:
+            response = await self._create_message(
+                chat_id, body, thread_name, write_key
+            )
+        except Exception as exc:  # noqa: BLE001
+            retryable = _is_retryable_chat_error(exc)
+            logger.warning(
+                "[%s] card send failed chat_id=%s retryable=%s: %s",
+                self.name,
+                chat_id,
+                retryable,
+                exc,
+            )
+            return SendResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                retryable=retryable,
+            )
+        return SendResult(
+            success=True,
+            message_id=(response or {}).get("name"),
+            raw_response=response,
+            retryable=False,
+        )
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        thread_name = self._thread_name(metadata)
+        write_key = self._write_key(chat_id, thread_name)
+        if write_key in self._typing_placeholders:
+            return
+        body: Dict[str, Any] = {"text": GOOGLECHAT_PLACEHOLDER_TEXT}
+        if thread_name:
+            body["thread"] = {"name": thread_name}
+        try:
+            response = await self._create_message(chat_id, body, thread_name, write_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] placeholder send failed: %s", self.name, exc)
+            return
+        message_id = (response or {}).get("name")
+        if message_id:
+            self._typing_placeholders[write_key] = message_id
+            logger.debug(
+                "[%s] created Google Chat placeholder message=%s",
+                self.name,
+                message_id,
+            )
+
+    async def stop_typing(self, chat_id: str) -> None:
+        # Google Chat has no native typing indicator. Placeholder messages are
+        # normally handed off to send()/edit_message() for final text updates.
+        # If a turn exits before handoff, transition the placeholder so it does
+        # not sit forever as the placeholder text.
+        stale = [
+            (key, message_id)
+            for key, message_id in self._typing_placeholders.items()
+            if key[0] == chat_id
+        ]
+        for key, message_id in stale:
+            self._typing_placeholders.pop(key, None)
+            await self._patch_message_text(
+                chat_id, message_id, GOOGLECHAT_PLACEHOLDER_STOPPED_TEXT, key
+            )
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        thread_name = None
+        if "/threads/" in message_id:
+            thread_name = message_id.rsplit("/messages/", 1)[0]
+        result = await self._patch_message_text(
+            chat_id,
+            message_id,
+            content,
+            self._write_key(chat_id, thread_name),
+        )
+        if result.success and finalize:
+            logger.debug(
+                "[%s] finalized Google Chat streamed text message=%s",
+                self.name,
+                result.message_id,
+            )
+        return result
 
     # -- Outbound media upload (R2b) ---------------------------------------
 
@@ -1531,6 +1812,83 @@ def _normalize_chat_envelope(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _card_click_action_name(payload: Dict[str, Any]) -> str:
+    action = payload.get("action") or {}
+    return str(
+        action.get("actionMethodName")
+        or action.get("function")
+        or action.get("methodName")
+        or ""
+    ).strip()
+
+
+def _card_click_parameters(payload: Dict[str, Any]) -> Dict[str, str]:
+    action = payload.get("action") or {}
+    params: Dict[str, str] = {}
+    raw_params = action.get("parameters") or []
+    if isinstance(raw_params, dict):
+        raw_params = [{"key": key, "value": value} for key, value in raw_params.items()]
+    for item in raw_params:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or item.get("name") or "").strip()
+        if not key:
+            continue
+        params[key] = str(item.get("value", ""))
+    return params
+
+
+def _card_click_form_inputs(payload: Dict[str, Any]) -> Dict[str, list[str]]:
+    common = payload.get("common") or {}
+    raw_inputs = common.get("formInputs") or {}
+    if not isinstance(raw_inputs, dict):
+        return {}
+
+    selections: Dict[str, list[str]] = {}
+    for name, value in raw_inputs.items():
+        if not isinstance(value, dict):
+            continue
+        selected: list[str] = []
+        for input_key in ("stringInputs", "dateTimeInput", "dateInput", "timeInput"):
+            input_value = value.get(input_key)
+            if not isinstance(input_value, dict):
+                continue
+            raw_values = input_value.get("value")
+            if raw_values is None:
+                raw_values = [
+                    input_value.get("msSinceEpoch"),
+                    input_value.get("hours"),
+                    input_value.get("minutes"),
+                ]
+            if not isinstance(raw_values, list):
+                raw_values = [raw_values]
+            selected.extend(str(item) for item in raw_values if item is not None)
+        if selected:
+            selections[str(name)] = selected
+    return selections
+
+
+def _synthesize_card_click_text(payload: Dict[str, Any]) -> str:
+    action_name = _card_click_action_name(payload)
+    params = _card_click_parameters(payload)
+    selections = _card_click_form_inputs(payload)
+    if not action_name and not params and not selections:
+        return ""
+
+    lines = ["Google Chat card click"]
+    if action_name:
+        lines.append(f"action: {action_name}")
+    if params:
+        lines.append("parameters:")
+        for key in sorted(params):
+            lines.append(f"- {key}: {params[key]}")
+    if selections:
+        lines.append("selections:")
+        for key in sorted(selections):
+            lines.append(f"- {key}: {', '.join(selections[key])}")
+    return "\n".join(lines)
+
+
 def _space_target_resource(space_id: str) -> str:
     """Format a space resource name as a Workspace Events target URL."""
     if space_id.startswith("//chat.googleapis.com/"):
@@ -1548,7 +1906,8 @@ def _parse_iso_epoch(value: Any) -> Optional[float]:
         text = str(value).replace("Z", "+00:00")
         dt = _dt.datetime.fromisoformat(text)
         return dt.timestamp()
-    except Exception:
+    except Exception as exc:
+        logger.debug("Invalid Google Chat timestamp %r: %s", value, exc)
         return None
 
 

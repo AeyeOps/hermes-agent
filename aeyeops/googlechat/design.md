@@ -268,8 +268,8 @@ Chat's per-message text limit (confirmed during transport research).
 
 **Card v2 is in scope for the initial adapter** (requirements UC-36
 and UC-37). Agents emit cards by calling a platform-aware
-`send_chat_card` tool registered only when `googlechat` is in the
-active platforms list. The tool accepts a narrower pydantic
+`send_chat_card` tool exposed through the `hermes-googlechat` toolset.
+The tool accepts a narrower pydantic
 `CardSpec` — not raw Card v2 JSON — so the agent's authorship surface
 is bounded and invalid widgets fail at schema validation rather than
 at the Chat API edge. The adapter translates `CardSpec` → Card v2

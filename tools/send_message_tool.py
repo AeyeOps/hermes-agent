@@ -29,6 +29,7 @@ _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::(
 _SLACK_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,})\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+_GOOGLECHAT_TARGET_RE = re.compile(r"^\s*(spaces/[A-Za-z0-9_-]+)(?:/(threads/[A-Za-z0-9_-]+))?\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -132,7 +133,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics, Discord threads, and Google Chat threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'googlechat:spaces/***', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
             },
             "message": {
                 "type": "string",
@@ -193,10 +194,18 @@ def _handle_send(args):
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
                     f"Use send_message(action='list') to see available targets."
                 })
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Channel resolution failed for %s:%s: %s",
+                platform_name,
+                target_ref,
+                _sanitize_error_text(exc),
+                exc_info=True,
+            )
             return json.dumps({
                 "error": f"Could not resolve '{target_ref}' on {platform_name}. "
-                f"Try using a numeric channel ID instead."
+                f"Try using an explicit channel ID instead. "
+                f"Resolution error: {_sanitize_error_text(type(exc).__name__ + ': ' + str(exc))}"
             })
 
     from tools.interrupt import is_interrupted
@@ -299,8 +308,14 @@ def _handle_send(args):
                     user_id=user_id,
                 ):
                     result["mirrored"] = True
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "Failed to mirror sent message into %s:%s: %s",
+                    platform_name,
+                    chat_id,
+                    _sanitize_error_text(exc),
+                    exc_info=True,
+                )
 
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
@@ -338,6 +353,13 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
+    if platform_name == "googlechat":
+        match = _GOOGLECHAT_TARGET_RE.fullmatch(target_ref)
+        if match:
+            chat_id = match.group(1)
+            thread_suffix = match.group(2)
+            thread_id = f"{chat_id}/{thread_suffix}" if thread_suffix else None
+            return chat_id, thread_id, True
     if platform_name in _PHONE_PLATFORMS:
         match = _E164_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -1645,7 +1667,8 @@ async def _send_googlechat(pconfig, chat_id, message, thread_id=None):
         from gateway.platforms.googlechat import GoogleChatAdapter, check_googlechat_requirements
         if not check_googlechat_requirements(pconfig):
             return {"error": "Google Chat requirements not met. Run: pip install 'hermes-agent[googlechat]' and configure service_account_json."}
-    except ImportError:
+    except ImportError as exc:
+        logger.debug("Google Chat adapter import failed: %s", exc, exc_info=True)
         return {"error": "Google Chat adapter not available."}
 
     try:
@@ -1661,6 +1684,7 @@ async def _send_googlechat(pconfig, chat_id, message, thread_id=None):
             "message_id": result.message_id,
         }
     except Exception as e:
+        logger.warning("Google Chat send failed: %s", _sanitize_error_text(e), exc_info=True)
         return _error(f"Google Chat send failed: {e}")
 
 
@@ -1673,7 +1697,8 @@ def _check_send_message():
     try:
         from gateway.status import is_gateway_running
         return is_gateway_running()
-    except Exception:
+    except Exception as exc:
+        logger.debug("Gateway status check failed for send_message availability: %s", exc, exc_info=True)
         return False
 
 

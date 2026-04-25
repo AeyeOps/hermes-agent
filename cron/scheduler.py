@@ -77,7 +77,7 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "telegram", "discord", "slack", "whatsapp", "signal",
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
-    "qqbot", "yuanbao",
+    "qqbot", "yuanbao", "googlechat",
 })
 
 # Platforms that support a configured cron/notification home target, mapped to
@@ -97,6 +97,7 @@ _HOME_TARGET_ENV_VARS = {
     "weixin": "WEIXIN_HOME_CHANNEL",
     "bluebubbles": "BLUEBUBBLES_HOME_CHANNEL",
     "qqbot": "QQBOT_HOME_CHANNEL",
+    "googlechat": "GOOGLECHAT_HOME_CHANNEL",
 }
 
 # Legacy env var names kept for back-compat.  Each entry is the current
@@ -351,6 +352,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
+
 
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false

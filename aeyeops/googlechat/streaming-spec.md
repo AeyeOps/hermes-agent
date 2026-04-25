@@ -1,8 +1,13 @@
 # Streaming, Markdown Rendering, and Thinking-Ack — Spec
 
-**Status:** Draft
+**Status:** Partially implemented locally
 **Date:** 2026-04-20
 **Scope:** Three user-visible behaviours we want on the `googlechat` adapter, on top of the shipped DEMO-1 baseline.
+
+**2026-04-25 implementation note:** text-first streaming is implemented in
+`gateway/platforms/googlechat.py` with placeholder handoff, `updateMask=text`
+patches, and per-space write pacing. `cardsV2` finalization and live tenant
+smoke verification remain open.
 
 ---
 

@@ -334,6 +334,17 @@ PLATFORM_HINTS = {
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be uploaded as attachments."
     ),
+    "googlechat": (
+        "You are in Google Chat communicating with your user. Google Chat uses "
+        "a limited markup dialect: use *bold*, _italic_, ~strikethrough~, "
+        "`inline code`, ```code blocks```, and links as <url|text>. Avoid "
+        "GitHub-flavored markdown tables because they do not render as tables. "
+        "For compact interactive UI, use send_chat_card when available; it sends "
+        "Google Chat Card v2 messages with supported text, image, button, divider, "
+        "and selection widgets. MEDIA:/path delivery falls back to the adapter's "
+        "configured Google Chat media support; prefer text or cards unless an "
+        "attachment is specifically useful."
+    ),
     "signal": (
         "You are on a text messaging communication platform, Signal. "
         "Please do not use markdown as it does not render. "

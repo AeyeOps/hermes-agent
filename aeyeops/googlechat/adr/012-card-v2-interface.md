@@ -77,10 +77,10 @@ implementation against the actual Chat / Pub/Sub event shape.
 
 ### Outbound (agent → card)
 
-A new `send_chat_card` tool is registered in `toolsets.py` **only when
-`googlechat` is in the active platforms list**. The tool accepts a
-narrower pydantic `CardSpec` schema — not raw Card v2 JSON — so the
-agent's authorship surface stays bounded and invalid widgets fail at
+A new `send_chat_card` tool is exposed through the `hermes-googlechat`
+toolset only. The tool accepts a narrower pydantic `CardSpec` schema —
+not raw Card v2 JSON — so the agent's authorship surface stays bounded
+and invalid widgets fail at
 validation rather than at the Chat API edge.
 
 Conceptual signature:

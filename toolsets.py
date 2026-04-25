@@ -406,7 +406,7 @@ TOOLSETS = {
 
     "hermes-googlechat": {
         "description": "Google Chat bot toolset - Workspace messaging via Pub/Sub inbound + Chat REST outbound",
-        "tools": _HERMES_CORE_TOOLS,
+        "tools": _HERMES_CORE_TOOLS + ["send_chat_card"],
         "includes": []
     },
 
