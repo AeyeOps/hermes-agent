@@ -342,12 +342,17 @@ def _compute_tool_definitions(
     tools_to_include: set = set()
 
     if enabled_toolsets is not None:
+        registered_tool_names = set(registry.get_all_tool_names())
         for toolset_name in enabled_toolsets:
             if validate_toolset(toolset_name):
                 resolved = resolve_toolset(toolset_name)
                 tools_to_include.update(resolved)
                 if not quiet_mode:
                     print(f"✅ Enabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
+            elif toolset_name in registered_tool_names:
+                tools_to_include.add(toolset_name)
+                if not quiet_mode:
+                    print(f"✅ Enabled tool '{toolset_name}'")
             elif toolset_name in _LEGACY_TOOLSET_MAP:
                 legacy_tools = _LEGACY_TOOLSET_MAP[toolset_name]
                 tools_to_include.update(legacy_tools)
