@@ -157,6 +157,12 @@ _DISCORD_MENTION_RE = re.compile(r"<@!?(\d{17,20})>")
 # Negative lookahead prevents matching hex strings or identifiers
 _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
 
+# Google Chat resource names. Keep these scoped to the resource segments so a
+# full spaces/*/messages/* string remains structurally useful after redaction.
+_GOOGLECHAT_SPACE_RE = re.compile(r"\bspaces/[A-Za-z0-9_-]+")
+_GOOGLECHAT_USER_RE = re.compile(r"\busers/\d{15,25}\b")
+_GOOGLECHAT_MESSAGE_RE = re.compile(r"\bmessages/[A-Za-z0-9_.-]+")
+
 # URLs containing query strings — matches `scheme://...?...[# or end]`.
 # Used to scan text for URLs whose query params may contain secrets.
 # Ported from nearai/ironclaw#2529.
@@ -388,6 +394,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
             return phone[:2] + "****" + phone[-2:]
         return phone[:4] + "****" + phone[-4:]
     text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
+
+    # Google Chat resource identifiers
+    text = _GOOGLECHAT_SPACE_RE.sub("spaces/***", text)
+    text = _GOOGLECHAT_USER_RE.sub("users/***", text)
+    text = _GOOGLECHAT_MESSAGE_RE.sub("messages/***", text)
 
     return text
 

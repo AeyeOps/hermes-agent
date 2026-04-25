@@ -22,6 +22,28 @@ ADR-013 is **Proposed**, not accepted. Public docs checked on
 2026-04-24 still require live verification for the exact app-auth scope
 coverage and Workspace Events subscription TTL in the target tenant.
 
+## 2026-04-25 unblocked implementation status
+
+The non-admin-gated next work from
+`docs/roadmap/googlechat-unblocked-next-work-spec.md` is implemented locally
+pending live Google Chat verification:
+
+- Google Chat platform prompting now describes Chat markup, media expectations,
+  and the `send_chat_card` card path.
+- `send_chat_card` is scoped to the `hermes-googlechat` toolset and posts a
+  constrained Card v2 payload through the existing Chat REST client.
+- `CARD_CLICKED` now synthesizes a normal text `MessageEvent` with action,
+  parameters, and form selections; no pending-card registry was added.
+- Cron delivery, `send_message`, redaction, CLI status, and gateway setup now
+  include Google Chat `spaces/...` targets and service-account/home-channel
+  visibility.
+- Streaming is text-first: placeholder creation hands off to progressive
+  `spaces.messages.patch(updateMask=text)` edits with per-space pacing.
+
+Still not done here: live tenant smoke verification for card rendering, click
+delivery, cron delivery, and progressive edits. `cardsV2` streaming finalization
+remains a later optional sub-scope.
+
 ## Workflow: feasibility → implementation path → implementation plan
 
 Capability-gap items (R2+) progress through three gates before any code
