@@ -132,6 +132,102 @@ def test_forum_general_topic_without_message_thread_id_keeps_thread_context():
     assert event.source.thread_id == "1"
 
 
+def test_channel_posts_without_from_user_are_authorized_as_channel_identity():
+    """Telegram channel_post updates have no from_user; use channel id as source user."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    message = SimpleNamespace(
+        text="channel instruction",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-1001234567890,
+            type=telegram_mod.ChatType.CHANNEL,
+            is_forum=False,
+            title="Synthetic Broadcast Channel",
+        ),
+        from_user=None,
+        message_thread_id=None,
+        reply_to_message=None,
+        message_id=20,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=SimpleNamespace(value="text"))
+
+    assert event.source.chat_id == "-1001234567890"
+    assert event.source.chat_type == "channel"
+    assert event.source.user_id == "-1001234567890"
+    assert event.source.user_name == "Synthetic Broadcast Channel"
+
+
+@pytest.mark.asyncio
+async def test_text_handler_accepts_channel_post_message():
+    """PTB exposes Telegram channel_post updates separately from update.message."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    captured = []
+    adapter._should_process_message = lambda message: True
+    adapter._clean_bot_trigger_text = lambda text: text
+    adapter._enqueue_text_event = captured.append
+    message = SimpleNamespace(
+        text="run channel task",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-1001234567890,
+            type=telegram_mod.ChatType.CHANNEL,
+            is_forum=False,
+            title="Synthetic Broadcast Channel",
+        ),
+        from_user=None,
+        message_thread_id=None,
+        reply_to_message=None,
+        message_id=21,
+        date=None,
+    )
+    update = SimpleNamespace(message=None, channel_post=message, effective_message=message, update_id=12345)
+
+    await adapter._handle_text_message(update, context=None)
+
+    assert len(captured) == 1
+    assert captured[0].text == "run channel task"
+    assert captured[0].source.chat_type == "channel"
+    assert captured[0].source.user_id == "-1001234567890"
+
+
+@pytest.mark.asyncio
+async def test_text_handler_ignores_edited_effective_message():
+    """Edited updates may have effective_message but should not be treated as new text."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    captured = []
+    adapter._should_process_message = lambda message: True
+    adapter._clean_bot_trigger_text = lambda text: text
+    adapter._enqueue_text_event = captured.append
+    message = SimpleNamespace(
+        text="edited text",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-1001234567890,
+            type=telegram_mod.ChatType.CHANNEL,
+            is_forum=False,
+            title="Synthetic Broadcast Channel",
+        ),
+        from_user=None,
+        message_thread_id=None,
+        reply_to_message=None,
+        message_id=22,
+        date=None,
+    )
+    update = SimpleNamespace(message=None, channel_post=None, edited_message=message, effective_message=message, update_id=12346)
+
+    await adapter._handle_text_message(update, context=None)
+
+    assert captured == []
+
+
 @pytest.mark.asyncio
 async def test_send_omits_general_topic_thread_id():
     """Telegram sends to forum General should omit message_thread_id=1."""

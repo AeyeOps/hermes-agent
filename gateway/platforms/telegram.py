@@ -2980,6 +2980,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         return self._message_matches_mention_patterns(message)
 
+    def _message_from_update(self, update: Update) -> Optional[Message]:
+        """Return regular messages and channel posts, but not edited/business updates."""
+        return getattr(update, "message", None) or getattr(update, "channel_post", None)
+
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
 
@@ -2987,33 +2991,35 @@ class TelegramAdapter(BasePlatformAdapter):
         rapid successive text messages from the same user/chat and aggregate
         them into a single MessageEvent before dispatching.
         """
-        if not update.message or not update.message.text:
+        msg = self._message_from_update(update)
+        if not msg or not msg.text:
             return
-        if not self._should_process_message(update.message):
+        if not self._should_process_message(msg):
             return
 
-        event = self._build_message_event(update.message, MessageType.TEXT, update_id=update.update_id)
+        event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
         self._enqueue_text_event(event)
 
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
-        if not update.message or not update.message.text:
+        msg = self._message_from_update(update)
+        if not msg or not msg.text:
             return
-        if not self._should_process_message(update.message, is_command=True):
+        if not self._should_process_message(msg, is_command=True):
             return
         
-        event = self._build_message_event(update.message, MessageType.COMMAND, update_id=update.update_id)
+        event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         await self.handle_message(event)
 
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
-        if not update.message:
+        msg = self._message_from_update(update)
+        if not msg:
             return
-        if not self._should_process_message(update.message):
+        if not self._should_process_message(msg):
             return
 
-        msg = update.message
         venue = getattr(msg, "venue", None)
         location = getattr(venue, "location", None) if venue else getattr(msg, "location", None)
 
@@ -3167,12 +3173,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _handle_media_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming media messages, downloading images to local cache."""
-        if not update.message:
+        msg = self._message_from_update(update)
+        if not msg:
             return
-        if not self._should_process_message(update.message):
+        if not self._should_process_message(msg):
             return
-        
-        msg = update.message
         
         # Determine media type
         if msg.sticker:
@@ -3655,13 +3660,21 @@ class TelegramAdapter(BasePlatformAdapter):
                             break
                     break
 
-        # Build source
+        # Build source. Telegram channel_post updates do not have from_user;
+        # authenticate them by the channel identity so approved broadcast
+        # channels can still start sessions and receive responses.
+        source_user_id = str(user.id) if user else None
+        source_user_name = user.full_name if user else None
+        if user is None and chat_type in {"dm", "channel"}:
+            source_user_id = str(chat.id)
+            source_user_name = chat.title or (chat.full_name if hasattr(chat, "full_name") else None)
+
         source = self.build_source(
             chat_id=str(chat.id),
             chat_name=chat.title or (chat.full_name if hasattr(chat, "full_name") else None),
             chat_type=chat_type,
-            user_id=str(user.id) if user else (str(chat.id) if chat_type == "dm" else None),
-            user_name=user.full_name if user else (chat.full_name if hasattr(chat, "full_name") and chat_type == "dm" else None),
+            user_id=source_user_id,
+            user_name=source_user_name,
             thread_id=thread_id_str,
             chat_topic=chat_topic,
         )
