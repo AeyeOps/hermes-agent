@@ -308,6 +308,7 @@ class TestBuiltinDiscovery:
             "tools.mixture_of_agents_tool",
             "tools.process_registry",
             "tools.rl_training_tool",
+            "tools.send_chat_card_tool",
             "tools.send_message_tool",
             "tools.session_search_tool",
             "tools.skill_manager_tool",

@@ -8,6 +8,12 @@ from hermes_cli import config as hermes_config
 from hermes_cli import main as hermes_main
 
 
+@pytest.fixture(autouse=True)
+def _clear_update_branch_override(monkeypatch):
+    """These tests assert the default updater branch behavior."""
+    monkeypatch.delenv("HERMES_UPDATE_BRANCH", raising=False)
+
+
 def test_stash_local_changes_if_needed_returns_none_when_tree_clean(monkeypatch, tmp_path):
     calls = []
 

@@ -155,9 +155,14 @@ class TestParseIsoEpoch:
 
 
 def _stub_workspaceevents_service(
-    expire_time: str = "2026-04-25T12:00:00Z",
+    expire_time: str | None = None,
     subscription_name: str = "subscriptions/sub-1",
 ) -> MagicMock:
+    if expire_time is None:
+        expire_time = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(time.time() + WORKSPACE_EVENTS_DEFAULT_TTL_SECONDS),
+        )
     service = MagicMock()
     create = service.subscriptions.return_value.create.return_value
     create.execute.return_value = {

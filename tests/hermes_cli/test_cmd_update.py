@@ -39,6 +39,12 @@ def mock_args():
     return SimpleNamespace()
 
 
+@pytest.fixture(autouse=True)
+def _clear_update_branch_override(monkeypatch):
+    """These tests assert the default updater branch behavior."""
+    monkeypatch.delenv("HERMES_UPDATE_BRANCH", raising=False)
+
+
 class TestCmdUpdateBranchFallback:
     """cmd_update falls back to main when current branch has no remote counterpart."""
 
