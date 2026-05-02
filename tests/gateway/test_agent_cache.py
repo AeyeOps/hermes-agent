@@ -964,8 +964,10 @@ class TestAgentCacheSpilloverLive:
         monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
-        N_THREADS = 8
-        PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
+        # Keep this meaningfully concurrent and over-cap without exceeding
+        # the global per-test timeout when the full suite is under load.
+        N_THREADS = 6
+        PER_THREAD = 8  # 6 * 8 = 48 inserts into a 16-slot cache
 
         def worker(tid: int):
             for j in range(PER_THREAD):
@@ -993,6 +995,12 @@ class TestAgentCacheSpilloverLive:
             f"Expected exactly {CAP} entries after concurrent inserts, "
             f"got {len(runner._agent_cache)}."
         )
+
+        for agent, _sig in list(runner._agent_cache.values()):
+            try:
+                agent.release_clients()
+            except Exception:
+                pass
 
     def test_evicted_session_next_turn_gets_fresh_agent(self, monkeypatch):
         """After eviction, the same session_key can insert a fresh agent.

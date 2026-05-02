@@ -230,8 +230,13 @@ class TestIRCGatewaySetupFreshInstall:
             monkeypatch.setenv("IRC_CHANNEL", "#hermes")
             monkeypatch.setenv("IRC_NICKNAME", "hermes-bot")
 
+            def select_irc_platform(question, choices, pre_selected=None):
+                return [idx for idx, choice in enumerate(choices) if "IRC" in choice]
+
             monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *a, **kw: False)
+            monkeypatch.setattr(setup_mod, "prompt_checklist", select_irc_platform)
             monkeypatch.setattr(setup_mod, "prompt_choice", lambda *a, **kw: 0)
+            monkeypatch.setattr(gateway_mod, "get_env_value", lambda *a, **kw: "")
             monkeypatch.setattr(gateway_mod, "supports_systemd_services", lambda: False)
             monkeypatch.setattr(gateway_mod, "is_macos", lambda: False)
             monkeypatch.setattr(gateway_mod, "_is_service_installed", lambda: False)

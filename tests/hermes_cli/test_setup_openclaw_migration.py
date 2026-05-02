@@ -407,7 +407,12 @@ class TestGetSectionConfigSummary:
         assert result == "max turns: 120"
 
     def test_gateway_returns_none_without_tokens(self):
-        with patch.object(setup_mod, "get_env_value", return_value=""):
+        # _get_section_config_summary delegates gateway status checks to
+        # hermes_cli.gateway._platform_status(), whose module-level
+        # get_env_value binding must be isolated separately from setup_mod.
+        import hermes_cli.gateway as gateway_mod
+        with patch.object(setup_mod, "get_env_value", return_value=""), \
+             patch.object(gateway_mod, "get_env_value", return_value=""):
             result = setup_mod._get_section_config_summary({}, "gateway")
         assert result is None
 
@@ -628,6 +633,8 @@ class TestSetupWizardSkipsConfiguredSections:
 
         reloaded_config = {"model": "openai/gpt-4"}
 
+        import hermes_cli.gateway as gateway_mod
+
         with (
             patch.object(setup_mod, "ensure_hermes_home"),
             patch.object(
@@ -636,6 +643,7 @@ class TestSetupWizardSkipsConfiguredSections:
             ),
             patch.object(setup_mod, "get_hermes_home", return_value=tmp_path),
             patch.object(setup_mod, "get_env_value", side_effect=env_side),
+            patch.object(gateway_mod, "get_env_value", side_effect=env_side),
             patch.object(setup_mod, "is_interactive_stdin", return_value=True),
             patch("hermes_cli.auth.get_active_provider", return_value=None),
             patch("builtins.input", return_value=""),

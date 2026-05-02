@@ -124,7 +124,13 @@ class TestMcpRegistrationE2E:
         mock_conn.request_permission = AsyncMock()
         acp_agent._conn = mock_conn
 
-        def mock_run_conversation(user_message, conversation_history=None, task_id=None, **kwargs):
+        def mock_run_conversation(
+            user_message,
+            conversation_history=None,
+            task_id=None,
+            persist_user_message=True,
+            **kwargs,
+        ):
             """Simulate an agent turn that calls terminal, gets a result, then responds."""
             agent = state.agent
 
@@ -214,7 +220,13 @@ class TestMcpRegistrationE2E:
         mock_conn.request_permission = AsyncMock()
         acp_agent._conn = mock_conn
 
-        def mock_run(user_message, conversation_history=None, task_id=None, **kwargs):
+        def mock_run(
+            user_message,
+            conversation_history=None,
+            task_id=None,
+            persist_user_message=True,
+            **kwargs,
+        ):
             agent = state.agent
             # Fire two tool calls
             if agent.tool_progress_callback:
