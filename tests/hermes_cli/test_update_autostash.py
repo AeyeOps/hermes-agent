@@ -313,6 +313,50 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
 
 
+def test_resolve_update_branch_uses_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_UPDATE_BRANCH", "aeyeops-main")
+
+    branch, source = hermes_main._resolve_update_branch(["git"], Path(tmp_path))
+
+    assert branch == "aeyeops-main"
+    assert source == "HERMES_UPDATE_BRANCH override"
+
+
+def test_resolve_update_branch_uses_origin_head(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        assert cmd == [
+            "git",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ]
+        return SimpleNamespace(stdout="origin/aeyeops-main\n", returncode=0)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    branch, source = hermes_main._resolve_update_branch(["git"], Path(tmp_path))
+
+    assert branch == "aeyeops-main"
+    assert source == "origin/HEAD"
+    assert len(calls) == 1
+
+
+def test_resolve_update_branch_defaults_to_main_without_origin_head(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(stdout="", returncode=128)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    branch, source = hermes_main._resolve_update_branch(["git"], Path(tmp_path))
+
+    assert branch == "main"
+    assert source == "default"
+
+
 def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypatch, tmp_path, capsys):
     """When .[all] fails, update should keep base deps and retry extras individually."""
     _setup_update_mocks(monkeypatch, tmp_path)
@@ -396,6 +440,7 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
 
 def _make_update_side_effect(
     current_branch="main",
+    origin_head="main",
     commit_count="3",
     ff_only_fails=False,
     reset_fails=False,
@@ -412,6 +457,8 @@ def _make_update_side_effect(
             if fetch_fails:
                 return SimpleNamespace(stdout="", stderr=fetch_stderr, returncode=128)
             return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if "symbolic-ref" in joined and "refs/remotes/origin/HEAD" in joined:
+            return SimpleNamespace(stdout=f"origin/{origin_head}\n", stderr="", returncode=0)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return SimpleNamespace(stdout=f"{current_branch}\n", stderr="", returncode=0)
         if "checkout" in joined and "main" in joined:
@@ -487,6 +534,32 @@ def test_cmd_update_switches_to_main_from_feature_branch(monkeypatch, tmp_path, 
     out = capsys.readouterr().out
     assert "fix/something" in out
     assert "switching to main" in out
+
+
+def test_cmd_update_tracks_origin_head_branch(monkeypatch, tmp_path, capsys):
+    """Fork installs update against origin/HEAD when it is not main."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    side_effect, recorded = _make_update_side_effect(
+        current_branch="aeyeops-main",
+        origin_head="aeyeops-main",
+    )
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    rev_list_calls = [c for c in recorded if "rev-list" in c]
+    assert rev_list_calls == [["git", "rev-list", "HEAD..origin/aeyeops-main", "--count"]]
+
+    pull_calls = [c for c in recorded if "pull" in c and "--ff-only" in c]
+    assert pull_calls == [["git", "pull", "--ff-only", "origin", "aeyeops-main"]]
+
+    checkout_calls = [c for c in recorded if "checkout" in c]
+    assert checkout_calls == []
+
+    out = capsys.readouterr().out
+    assert "Updating branch 'aeyeops-main' (origin/HEAD)" in out
 
 
 def test_cmd_update_switches_to_main_from_detached_head(monkeypatch, tmp_path, capsys):
