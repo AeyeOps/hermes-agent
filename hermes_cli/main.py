@@ -6657,6 +6657,26 @@ def cmd_update(args):
         _finalize_update_output(_update_io_state)
 
 
+def _resolve_update_branch(git_cmd: list[str], cwd: Path) -> tuple[str, str]:
+    """Return the branch that ``hermes update`` should track."""
+    branch_override = os.getenv("HERMES_UPDATE_BRANCH")
+    if branch_override:
+        return branch_override, "HERMES_UPDATE_BRANCH override"
+
+    result = subprocess.run(
+        git_cmd + ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        remote_head = (getattr(result, "stdout", "") or "").strip()
+        if remote_head.startswith("origin/"):
+            return remote_head.removeprefix("origin/"), "origin/HEAD"
+
+    return "main", "default"
+
+
 def _cmd_update_impl(args, gateway_mode: bool):
     """Body of ``cmd_update`` — kept separate so the wrapper can always
     restore stdio even on ``sys.exit``."""
@@ -6762,14 +6782,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         current_branch = result.stdout.strip()
 
-        # Default to main; fork/deploy setups can override via env var to
-        # track a long-lived feature branch without force-switching off it.
-        branch_override = os.getenv("HERMES_UPDATE_BRANCH")
-        branch = branch_override or "main"
-        if branch_override:
-            print(
-                f"→ Updating branch '{branch}' (HERMES_UPDATE_BRANCH override)"
-            )
+        branch, branch_source = _resolve_update_branch(git_cmd, PROJECT_ROOT)
+        if branch_source != "default":
+            print(f"→ Updating branch '{branch}' ({branch_source})")
 
         # If user is on a non-target branch or detached HEAD, switch to target
         if current_branch != branch:
