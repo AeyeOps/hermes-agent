@@ -286,6 +286,13 @@ _MAX_BASE64_BYTES = 20 * 1024 * 1024
 # rejects an image, we downscale to this target and retry once.
 _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
 
+# Inline result budget for vision_analyze. Vision results are LLM-generated
+# prose/JSON, so repeated image or deck reviews can accumulate large context
+# blobs while still staying under the global 100k tool-result default. Keep the
+# full result via the central persisted-output/read_file path instead of adding
+# vision-specific truncation in the tool body.
+VISION_ANALYZE_RESULT_BUDGET_CHARS = 8_000
+
 
 def _is_image_size_error(error: Exception) -> bool:
     """Detect if an API error is related to image or payload size."""
@@ -800,4 +807,5 @@ registry.register(
     check_fn=check_vision_requirements,
     is_async=True,
     emoji="👁️",
+    max_result_size_chars=VISION_ANALYZE_RESULT_BUDGET_CHARS,
 )
