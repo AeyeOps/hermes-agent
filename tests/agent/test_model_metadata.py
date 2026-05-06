@@ -931,6 +931,13 @@ class TestParseContextLimitFromError:
         msg = "invalid params, context window exceeds limit (2013)"
         assert parse_context_limit_from_error(msg) is None
 
+    def test_trtllm_max_num_tokens_is_not_context_length(self):
+        msg = (
+            "The sum of prompt length (35295.0), query length (0) should not "
+            "exceed max_num_tokens (32768)"
+        )
+        assert parse_context_limit_from_error(msg) is None
+
     def test_completely_unrelated_error(self):
         assert parse_context_limit_from_error("Invalid API key") is None
 

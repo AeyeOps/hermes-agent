@@ -533,3 +533,35 @@ class TestPerToolThresholds:
             assert val == 100_000
         except ImportError:
             pytest.skip("file_tools not importable in test env")
+
+    def test_vision_analyze_threshold_uses_persisted_output_path(self):
+        from tools.registry import registry
+        from tools.vision_tools import VISION_ANALYZE_RESULT_BUDGET_CHARS
+
+        val = registry.get_max_result_size("vision_analyze")
+        assert val == VISION_ANALYZE_RESULT_BUDGET_CHARS
+
+    def test_repeated_vision_results_persist_individually(self):
+        from tools.vision_tools import VISION_ANALYZE_RESULT_BUDGET_CHARS
+
+        env = MagicMock()
+        env.execute.return_value = {"output": "", "returncode": 0}
+        contents = [
+            f"slide deck analysis {i}\n" + ("x" * (VISION_ANALYZE_RESULT_BUDGET_CHARS + 500))
+            for i in range(3)
+        ]
+
+        inline_results = [
+            maybe_persist_tool_result(
+                content=content,
+                tool_name="vision_analyze",
+                tool_use_id=f"vision_{i}",
+                env=env,
+            )
+            for i, content in enumerate(contents)
+        ]
+
+        assert env.execute.call_count == 3
+        assert all(PERSISTED_OUTPUT_TAG in result for result in inline_results)
+        assert all(f"vision_{i}.txt" in result for i, result in enumerate(inline_results))
+        assert sum(len(result) for result in inline_results) < VISION_ANALYZE_RESULT_BUDGET_CHARS

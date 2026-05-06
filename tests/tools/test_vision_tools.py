@@ -19,6 +19,7 @@ from tools.vision_tools import (
     _is_image_size_error,
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
+    VISION_ANALYZE_RESULT_BUDGET_CHARS,
     vision_analyze_tool,
     check_vision_requirements,
 )
@@ -724,6 +725,7 @@ class TestVisionRegistration:
         assert entry is not None
         assert entry.toolset == "vision"
         assert entry.is_async is True
+        assert entry.max_result_size_chars == VISION_ANALYZE_RESULT_BUDGET_CHARS
 
     def test_schema_has_required_fields(self):
         from tools.registry import registry
