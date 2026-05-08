@@ -72,3 +72,27 @@ website/static/api/skills-index.json
 models-dev-upstream/
 aeyeops/**/__pycache__/
 aeyeops/googlechat/verify/results/
+
+# AeyeOps fork-local operational scratch and deployment secrets.
+# Keep reusable docs/templates/scripts tracked; keep host-local rendered configs,
+# password hashes, logs, and one-off operator notes out of the public fork.
+aeyeops/**/local/
+aeyeops/**/*.local
+aeyeops/**/*.local.*
+aeyeops/**/logs/
+aeyeops/**/*secret*
+aeyeops/**/*secrets*
+aeyeops/**/*password*
+aeyeops/**/*token*
+aeyeops/**/*credential*
+aeyeops/**/*credentials*
+aeyeops/**/*hash*
+aeyeops/**/*key.json
+!aeyeops/**/README.md
+!aeyeops/**/architecture.md
+!aeyeops/**/Caddyfile.example
+!aeyeops/**/scripts/*.sh
+!aeyeops/**/systemd/*.service
+!aeyeops/**/systemd/*.logrotate
+!aeyeops/googlechat/fixtures/*.json
+!aeyeops/googlechat/provisioning/requirements.yaml

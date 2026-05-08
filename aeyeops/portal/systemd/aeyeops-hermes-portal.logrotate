@@ -1,0 +1,13 @@
+# Placeholder template. The setup script writes an expanded copy to
+# /etc/logrotate.d/aeyeops-hermes-portal.
+
+HERMES_HOME/logs/aeyeops-portal-*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+    create 0640 root root
+}

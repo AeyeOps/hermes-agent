@@ -14,5 +14,7 @@ scratch work live here instead.
   so it's safe in a public fork.
 - `googlechat/` — design notes, spec, architecture decisions, and runbooks for
   the Google Chat platform adapter.
+- `portal/` — secured HTTPS exposure plan, Caddy/systemd templates, and
+  headless setup/verify scripts for the Hermes dashboard.
 
 Future fork work (if any) gets its own subdirectory alongside.
