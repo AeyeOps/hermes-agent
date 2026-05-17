@@ -161,6 +161,82 @@ def test_channel_posts_without_from_user_are_authorized_as_channel_identity():
     assert event.source.user_name == "Synthetic Broadcast Channel"
 
 
+def test_channel_skill_bindings_auto_load_for_telegram_channels():
+    """Telegram channels should support the shared channel_skill_bindings config."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    adapter.config.extra = {
+        "channel_skill_bindings": [
+            {"id": "-1001234567890", "skills": ["llm-wiki", "google-workspace"]}
+        ]
+    }
+    message = SimpleNamespace(
+        text="channel instruction",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-1001234567890,
+            type=telegram_mod.ChatType.CHANNEL,
+            is_forum=False,
+            title="Synthetic Broadcast Channel",
+        ),
+        from_user=None,
+        message_thread_id=None,
+        reply_to_message=None,
+        message_id=20,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=SimpleNamespace(value="text"))
+
+    assert event.auto_skill == ["llm-wiki", "google-workspace"]
+
+
+def test_channel_skill_bindings_merge_with_group_topic_skill():
+    """Channel bindings should augment, not overwrite, Telegram forum topic skills."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    adapter.config.extra = {
+        "group_topics": [
+            {
+                "chat_id": "-1001234567890",
+                "topics": [
+                    {"thread_id": 42, "name": "Ops Topic", "skill": "topic-skill"}
+                ],
+            }
+        ],
+        "channel_skill_bindings": [
+            {"id": "-1001234567890", "skills": ["llm-wiki", "topic-skill"]}
+        ],
+    }
+    message = SimpleNamespace(
+        text="topic instruction",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-1001234567890,
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=True,
+            title="Synthetic Forum Group",
+        ),
+        from_user=SimpleNamespace(
+            id=123,
+            username="operator",
+            full_name="Operator",
+            first_name="Operator",
+            last_name=None,
+        ),
+        message_thread_id=42,
+        reply_to_message=None,
+        message_id=21,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=SimpleNamespace(value="text"))
+
+    assert event.auto_skill == ["topic-skill", "llm-wiki"]
+
+
 @pytest.mark.asyncio
 async def test_text_handler_accepts_channel_post_message():
     """PTB exposes Telegram channel_post updates separately from update.message."""
