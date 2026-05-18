@@ -112,6 +112,7 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 | [`heartmula`](/docs/user-guide/skills/bundled/media/media-heartmula) | HeartMuLa: Suno-like song generation from lyrics + tags. | `media/heartmula` |
 | [`songsee`](/docs/user-guide/skills/bundled/media/media-songsee) | Audio spectrograms/features (mel, chroma, MFCC) via CLI. | `media/songsee` |
 | [`spotify`](/docs/user-guide/skills/bundled/media/media-spotify) | Spotify: play, search, queue, manage playlists and devices. | `media/spotify` |
+| [`video-transcript-timeline`](/docs/user-guide/skills/bundled/media/media-video-transcript-timeline) | Use when ingesting local or remotely accessible MP4/video files to create a timestamp-aligned transcript, screenshot timeline, slices, summaries at multiple fidelity levels, and packaged outputs. | `media/video-transcript-timeline` |
 | [`youtube-content`](/docs/user-guide/skills/bundled/media/media-youtube-content) | YouTube transcripts to summaries, threads, blogs. | `media/youtube-content` |
 
 ## mlops
