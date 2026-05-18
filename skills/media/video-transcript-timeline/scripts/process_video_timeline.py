@@ -295,9 +295,11 @@ def make_slices(duration: float, period: float, frame_position: str, screenshots
     return specs
 
 
-def extract_screenshots(video: Path, specs: Iterable[SliceSpec], out_dir: Path, max_width: int = 0) -> None:
+def extract_screenshots(video: Path, specs: Iterable[SliceSpec], out_dir: Path, max_width: int = 0) -> int:
     screenshots_dir = out_dir / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
+    created = 0
+    failures: List[str] = []
     for spec in specs:
         target = out_dir / spec.screenshot
         cmd = [
@@ -314,8 +316,21 @@ def extract_screenshots(video: Path, specs: Iterable[SliceSpec], out_dir: Path, 
             cmd += ["-vf", f"scale={max_width}:-2"]
         cmd += ["-q:v", "2", str(target)]
         proc = run(cmd, check=False)
-        if proc.returncode != 0:
-            eprint(f"WARN: failed to extract screenshot at {spec.frame_time:.3f}s: {proc.stderr[-500:]}")
+        if proc.returncode != 0 or not target.exists() or target.stat().st_size == 0:
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+            detail = proc.stderr[-500:].strip() or "ffmpeg returned no screenshot file"
+            failures.append(f"slice {spec.index} at {spec.frame_time:.3f}s: {detail}")
+            continue
+        created += 1
+
+    if failures:
+        preview = "\n".join(failures[:5])
+        remaining = "" if len(failures) <= 5 else f"\n... {len(failures) - 5} more failures"
+        raise RuntimeError(f"Failed to extract {len(failures)} screenshot(s):\n{preview}{remaining}")
+    return created
 
 
 def segments_for_slice(segments: List[Dict[str, Any]], start: float, end: float) -> List[Dict[str, Any]]:
@@ -435,44 +450,38 @@ Instructions:
     (out_dir / "summary_prompt.md").write_text(prompt, encoding="utf-8")
 
 
-def extract_clips(video: Path, specs: Iterable[SliceSpec], out_dir: Path) -> None:
+def extract_clips(video: Path, specs: Iterable[SliceSpec], out_dir: Path) -> int:
     clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
+    created = 0
     for spec in specs:
         clip = clips_dir / f"slice_{spec.index:04d}_{fmt_file_ts(spec.start)}_to_{fmt_file_ts(spec.end)}.mp4"
+        duration = max(0.01, spec.end - spec.start)
         cmd = [
             "ffmpeg",
             "-y",
             "-ss",
             f"{spec.start:.3f}",
-            "-to",
-            f"{spec.end:.3f}",
             "-i",
             str(video),
-            "-c",
-            "copy",
+            "-t",
+            f"{duration:.3f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-c:a",
+            "aac",
             str(clip),
         ]
         proc = run(cmd, check=False)
-        if proc.returncode != 0:
-            # Fall back to re-encode when stream-copy cut fails.
-            run([
-                "ffmpeg",
-                "-y",
-                "-ss",
-                f"{spec.start:.3f}",
-                "-to",
-                f"{spec.end:.3f}",
-                "-i",
-                str(video),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-c:a",
-                "aac",
-                str(clip),
-            ])
+        if proc.returncode != 0 or not clip.exists() or clip.stat().st_size == 0:
+            raise RuntimeError(
+                "Failed to extract clip for slice %s (%s-%s): %s"
+                % (spec.index, fmt_hms(spec.start), fmt_hms(spec.end), proc.stderr[-1000:])
+            )
+        created += 1
+    return created
 
 
 def collect_artifacts(out_dir: Path) -> List[Dict[str, Any]]:
@@ -489,7 +498,7 @@ def collect_artifacts(out_dir: Path) -> List[Dict[str, Any]]:
 
 
 def make_zip(out_dir: Path) -> Path:
-    archive_base = out_dir.with_suffix("")
+    archive_base = out_dir.parent / out_dir.name
     zip_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=out_dir))
     return zip_path
 
@@ -500,7 +509,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", help="Output directory. Default: ./video-transcript-output/<stem>-<timestamp>")
     parser.add_argument("--slice-seconds", default="60s", help="Screenshot/timeline slice interval, e.g. 30s, 1m, 00:01:30. Default: 60s")
     parser.add_argument("--frame-position", choices=["start", "midpoint", "end"], default="midpoint", help="Where in each slice to capture screenshot. Default: midpoint")
-    parser.add_argument("--formats", default="markdown,json,srt,vtt,csv", help="Comma-separated outputs: markdown,json,csv,srt,vtt. Default: all common formats")
+    parser.add_argument("--formats", default="markdown,json,srt,vtt,csv", help="Comma-separated outputs: markdown,json,csv,srt,vtt. Timeline markdown/json/csv are always generated. Default: all common formats")
     parser.add_argument("--summary-levels", default="executive,standard,detailed", help="Comma-separated summary levels to request in summary_prompt.md")
     parser.add_argument("--no-transcribe", action="store_true", help="Skip audio extraction/transcription; screenshots/timeline only")
     parser.add_argument("--transcript-json", help="Use an existing transcript JSON instead of running faster-whisper")
@@ -532,6 +541,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     formats = {x.strip().lower() for x in args.formats.split(",") if x.strip()}
+    # The timeline package contract always includes the human-readable,
+    # machine-readable, and spreadsheet timeline artifacts. User-requested
+    # formats add captions or aliases, but should not remove required outputs.
+    formats.update({"markdown", "json", "csv"})
     summary_levels = [x.strip().lower() for x in args.summary_levels.split(",") if x.strip()]
     slice_seconds = parse_time(args.slice_seconds)
 
@@ -571,7 +584,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_json(out_dir / "slice_specs.json", [asdict(s) for s in specs])
 
     eprint(f"Extracting {len(specs)} screenshots...")
-    extract_screenshots(video, specs, out_dir, max_width=args.screenshot_max_width)
+    screenshot_count = extract_screenshots(video, specs, out_dir, max_width=args.screenshot_max_width)
 
     eprint("Building timeline...")
     rows = build_timeline(specs, transcript_segments, args.excerpt_chars)
@@ -580,7 +593,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.extract_clips:
         eprint("Extracting clips...")
-        extract_clips(video, specs, out_dir)
+        clip_count = extract_clips(video, specs, out_dir)
+    else:
+        clip_count = 0
+
+    zip_path = (out_dir.parent / f"{out_dir.name}.zip") if args.make_zip else None
 
     manifest: Dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -595,9 +612,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "transcription": transcript_info,
         "segment_count": len(transcript_segments),
         "word_count": len(transcript_words),
-        "screenshot_count": len(specs),
-        "clip_count": len(specs) if args.extract_clips else 0,
+        "screenshot_count": screenshot_count,
+        "expected_screenshot_count": len(specs),
+        "clip_count": clip_count,
+        "zip": str(zip_path) if zip_path else None,
         "artifacts": [],
+        "external_artifacts": [
+            {
+                "path": str(zip_path),
+                "kind": "zip_package",
+                "note": "Created next to output_dir; not included inside output_dir artifact inventory.",
+            }
+        ] if zip_path else [],
         "notes": [],
     }
     if args.no_transcribe:
@@ -610,8 +636,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manifest["artifacts"] = collect_artifacts(out_dir)
     write_json(out_dir / "manifest.json", manifest)
 
-    zip_path = None
-    if args.make_zip:
+    if zip_path:
         zip_path = make_zip(out_dir)
         eprint(f"Created ZIP: {zip_path}")
 

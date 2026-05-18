@@ -80,6 +80,7 @@ Before processing, collect or infer the following. Ask the user only for missing
    - If exact word timing is needed, enable word timestamps.
 6. **Output formats**.
    - Defaults: `markdown,json,srt,vtt,csv`.
+   - Timeline Markdown, JSON, and CSV are package-required and should still be generated when the user asks for only captions or a subset.
    - Optional: Google Doc, DOCX, ZIP, clips, screenshot contact sheet.
 7. **Summary levels**.
    - Defaults: `executive`, `standard`, `detailed`.
