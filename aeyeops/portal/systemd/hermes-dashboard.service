@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes dashboard (loopback only)
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HERMES_HOME=HERMES_HOME_PLACEHOLDER
+WorkingDirectory=HERMES_HOME_PLACEHOLDER/hermes-agent
+ExecStart=HERMES_HOME_PLACEHOLDER/hermes-agent/venv/bin/python -m hermes_cli.main dashboard --host 127.0.0.1 --port 9119 --no-open
+Restart=on-failure
+RestartSec=5
+
+# Hardening. Keep this conservative: Hermes still needs access to its home tree,
+# provider auth files, logs, and dashboard build assets.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=HERMES_HOME_PLACEHOLDER
+
+[Install]
+WantedBy=multi-user.target

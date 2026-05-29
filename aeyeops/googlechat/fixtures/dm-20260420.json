@@ -1,0 +1,76 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "America/New_York",
+      "offset": -14400000
+    }
+  },
+  "chat": {
+    "user": {
+      "name": "USER_RESOURCE_PLACEHOLDER",
+      "displayName": "Example User",
+      "avatarUrl": "https://example.com/avatar.png",
+      "email": "user@example.com",
+      "type": "HUMAN",
+      "domainId": "EXAMPLE_DOMAIN"
+    },
+    "eventTime": "2026-04-20T21:56:46.474671Z",
+    "messagePayload": {
+      "space": {
+        "name": "DM_SPACE_RESOURCE_PLACEHOLDER",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-04-20T21:56:46.474671Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "spaceUri": "https://chat.google.com/dm/EXAMPLE_DM?cls=11"
+      },
+      "message": {
+        "name": "DM_MESSAGE_RESOURCE_PLACEHOLDER",
+        "sender": {
+          "name": "USER_RESOURCE_PLACEHOLDER",
+          "displayName": "Example User",
+          "avatarUrl": "https://example.com/avatar.png",
+          "email": "user@example.com",
+          "type": "HUMAN",
+          "domainId": "EXAMPLE_DOMAIN"
+        },
+        "createTime": "2026-04-20T21:56:46.474671Z",
+        "text": "capture dm",
+        "thread": {
+          "name": "DM_THREAD_RESOURCE_PLACEHOLDER",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "DM_SPACE_RESOURCE_PLACEHOLDER",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-04-20T21:56:46.474671Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "spaceUri": "https://chat.google.com/dm/EXAMPLE_DM?cls=11"
+        },
+        "argumentText": "capture dm",
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "capture dm"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=EXAMPLE_TOKEN"
+    }
+  }
+}

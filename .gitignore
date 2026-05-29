@@ -147,3 +147,24 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Local OMX workflow/runtime state.
+.omx/
+
+# AeyeOps fork-local operational scratch and deployment secrets.
+# Keep reusable docs/templates/scripts tracked; keep host-local rendered configs,
+# password hashes, logs, and one-off operator notes out of the public fork.
+aeyeops/**/__pycache__/
+aeyeops/googlechat/verify/results/
+aeyeops/**/local/
+aeyeops/**/*.local
+aeyeops/**/*.local.*
+aeyeops/**/logs/
+aeyeops/**/backup/
+aeyeops/**/backups/
+aeyeops/**/*.bak
+aeyeops/**/*.db
+aeyeops/**/*.sqlite
+aeyeops/**/*.sqlite3
+aeyeops/**/*.tar
+aeyeops/**/*.tar.gz

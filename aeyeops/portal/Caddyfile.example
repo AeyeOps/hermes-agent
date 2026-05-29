@@ -1,0 +1,53 @@
+# Placeholder-only Caddy config for the Hermes dashboard.
+# Replace DOMAIN, USERNAME, and HASHED_PASSWORD at deploy time.
+
+DOMAIN {
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/hermes-dashboard-access.log {
+			roll_size 10MiB
+			roll_keep 5
+			roll_keep_for 720h
+		}
+		format console
+	}
+
+	basic_auth {
+		USERNAME HASHED_PASSWORD
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy 127.0.0.1:9119 {
+		# Hermes validates Host against the bound host for DNS-rebinding defense.
+		# Keep the browser-facing host public, but use loopback on the upstream hop.
+		header_up Host 127.0.0.1:9119
+		header_up X-Forwarded-Proto https
+	}
+}
+
+
+# Mission Control path-prefix variant. Use this when another app owns the
+# hostname root and Hermes should live at https://DOMAIN/hermes/.
+# Keep Basic Auth inside the handle_path block so every Hermes route, API,
+# WebSocket, and dashboard plugin asset is gated before it reaches Hermes.
+
+DOMAIN {
+	handle_path /hermes* {
+		basic_auth {
+			USERNAME HASHED_PASSWORD
+		}
+
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host 127.0.0.1:9119
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Prefix /hermes
+		}
+	}
+}
