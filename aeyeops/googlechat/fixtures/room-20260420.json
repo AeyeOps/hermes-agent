@@ -1,0 +1,95 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "America/New_York",
+      "offset": -14400000
+    }
+  },
+  "chat": {
+    "user": {
+      "name": "USER_RESOURCE_PLACEHOLDER",
+      "displayName": "Example User",
+      "avatarUrl": "https://example.com/avatar.png",
+      "email": "user@example.com",
+      "type": "HUMAN",
+      "domainId": "EXAMPLE_DOMAIN"
+    },
+    "eventTime": "2026-04-20T21:58:33.299535Z",
+    "messagePayload": {
+      "space": {
+        "name": "SPACE_RESOURCE_PLACEHOLDER",
+        "type": "ROOM",
+        "displayName": "example-test-space",
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "SPACE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-04-20T21:58:33.299535Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "customer": "CUSTOMER_RESOURCE_PLACEHOLDER",
+        "spaceUri": "https://chat.google.com/room/EXAMPLE_SPACE?cls=11"
+      },
+      "message": {
+        "name": "SPACE_MESSAGE_RESOURCE_PLACEHOLDER",
+        "sender": {
+          "name": "USER_RESOURCE_PLACEHOLDER",
+          "displayName": "Example User",
+          "avatarUrl": "https://example.com/avatar.png",
+          "email": "user@example.com",
+          "type": "HUMAN",
+          "domainId": "EXAMPLE_DOMAIN"
+        },
+        "createTime": "2026-04-20T21:58:33.299535Z",
+        "text": "@Example Chat Assistant what is your context here can you share it and provide both id as well as the friendly description for each item",
+        "annotations": [
+          {
+            "type": "USER_MENTION",
+            "startIndex": 0,
+            "length": 21,
+            "userMention": {
+              "user": {
+                "name": "USER_RESOURCE_PLACEHOLDER",
+                "displayName": "Example Chat Assistant",
+                "avatarUrl": "AVATAR_URL_PLACEHOLDER",
+                "type": "BOT"
+              },
+              "type": "MENTION"
+            }
+          }
+        ],
+        "thread": {
+          "name": "SPACE_THREAD_RESOURCE_PLACEHOLDER",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "SPACE_RESOURCE_PLACEHOLDER",
+          "type": "ROOM",
+          "displayName": "example-test-space",
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "SPACE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-04-20T21:58:33.299535Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "customer": "CUSTOMER_RESOURCE_PLACEHOLDER",
+          "spaceUri": "https://chat.google.com/room/EXAMPLE_SPACE?cls=11"
+        },
+        "argumentText": " what is your context here can you share it and provide both id as well as the friendly description for each item",
+        "threadReply": true,
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "@Example Chat Assistant what is your context here can you share it and provide both id as well as the friendly description for each item"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=EXAMPLE_TOKEN"
+    }
+  }
+}

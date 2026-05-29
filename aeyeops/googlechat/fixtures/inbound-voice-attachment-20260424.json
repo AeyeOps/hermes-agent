@@ -1,0 +1,30 @@
+{
+  "type": "MESSAGE",
+  "space": {
+    "name": "ATTACHMENT_SPACE_RESOURCE_PLACEHOLDER",
+    "displayName": "test-room",
+    "spaceType": "SPACE"
+  },
+  "message": {
+    "name": "ATTACHMENT_MESSAGE_RESOURCE_PLACEHOLDER",
+    "sender": {
+      "name": "USER_RESOURCE_PLACEHOLDER",
+      "displayName": "Test User",
+      "type": "HUMAN"
+    },
+    "thread": {
+      "name": "ATTACHMENT_THREAD_RESOURCE_PLACEHOLDER"
+    },
+    "attachment": [
+      {
+        "name": "ATTACHMENT_RESOURCE_PLACEHOLDER",
+        "contentName": "voice.ogg",
+        "contentType": "audio/ogg",
+        "source": "UPLOADED_CONTENT",
+        "attachmentDataRef": {
+          "resourceName": "ATTACHMENT_MEDIA_RESOURCE_PLACEHOLDER"
+        }
+      }
+    ]
+  }
+}

@@ -62,6 +62,9 @@ ignored/
 .worktrees/
 environments/benchmarks/evals/
 
+# Local OMX workflow/runtime state.
+.omx/
+
 # Web UI build output
 hermes_cli/web_dist/
 apps/desktop/build/
@@ -123,3 +126,43 @@ scripts/out/
 # stores the published notes. They are not a build artifact and must never be
 # committed to the repo root. See the hermes-release skill.
 RELEASE_v*.md
+
+# AeyeOps fork-local operational scratch and deployment secrets.
+# Keep reusable docs/templates/scripts tracked; keep host-local rendered configs,
+# password hashes, logs, and one-off operator notes out of the public fork.
+aeyeops/**/__pycache__/
+aeyeops/googlechat/verify/results/
+aeyeops/**/local/
+aeyeops/**/*.local
+aeyeops/**/*.local.*
+aeyeops/**/logs/
+aeyeops/**/backup/
+aeyeops/**/backups/
+aeyeops/**/*.bak
+aeyeops/**/*.db
+aeyeops/**/*.sqlite
+aeyeops/**/*.sqlite3
+aeyeops/**/*.tar
+aeyeops/**/*.tar.gz
+aeyeops/**/*.tgz
+aeyeops/**/*.zip
+aeyeops/**/*.zst
+aeyeops/**/*secret*
+aeyeops/**/*secrets*
+aeyeops/**/*password*
+aeyeops/**/*token*
+aeyeops/**/*credential*
+aeyeops/**/*credentials*
+aeyeops/**/*hash*
+aeyeops/**/*key.json
+!aeyeops/**/README.md
+!aeyeops/**/architecture.md
+!aeyeops/**/Caddyfile.example
+!aeyeops/**/scripts/*.sh
+!aeyeops/**/systemd/*.service
+!aeyeops/**/systemd/*.logrotate
+!aeyeops/googlechat/fixtures/*.json
+!aeyeops/googlechat/provisioning/requirements.yaml
+
+# AEyeOps local continuation prompts and scratch files
+aeyeops/tmp/
