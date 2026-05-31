@@ -85,7 +85,7 @@ A platform is declaratively on/off based on its auth env vars. Empty
 ## Platform locks
 
 Every adapter acquires a named lock at connect-time on the external
-resource it binds to (Pub/Sub subscription, WhatsApp session dir, Telegram
+resource it binds to (callback endpoint, WhatsApp session dir, Telegram
 webhook, …). This prevents two gateway instances from racing on the same
 resource.
 
