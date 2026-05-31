@@ -9,5 +9,5 @@ HERMES_HOME/logs/aeyeops-portal-*.log {
     compress
     delaycompress
     dateext
-    create 0640 root root
+    create 0644 caddy caddy
 }

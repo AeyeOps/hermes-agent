@@ -144,6 +144,7 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     # status update as a separate message. Promote to TIER_MEDIUM once
     # Cloud's edit_message lands.
     "whatsapp_cloud":  _TIER_LOW,
+    "google_chat":     {**_TIER_MEDIUM, "tool_progress": "off"},
     "bluebubbles":     _TIER_LOW,
     "weixin":          _TIER_LOW,
     "wecom":           _TIER_LOW,

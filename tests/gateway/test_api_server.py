@@ -612,6 +612,8 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/toolsets", adapter._handle_toolsets)
+    app.router.add_post("/google-chat/actions", adapter._handle_google_chat_action)
+    app.router.add_post("/google-chat/events", adapter._handle_google_chat_event)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
@@ -834,6 +836,148 @@ class TestHealthDetailedEndpoint:
         with patch("tools.process_registry.process_registry.completion_queue.qsize", return_value=4), \
              patch("tools.async_delegation.active_count", return_value=2):
             assert adapter._readiness_work_counts() == (3, 4, 2)
+
+
+# ---------------------------------------------------------------------------
+# /google-chat/actions endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestGoogleChatActionEndpoint:
+    @pytest.mark.asyncio
+    async def test_google_chat_action_dispatches_with_google_auth(self, auth_adapter):
+        class FakeGoogleChat:
+            def __init__(self):
+                self.received = None
+
+            def verify_addon_request(self, auth_header):
+                return None if auth_header == "Bearer google-token" else "invalid_google_bearer_token"
+
+            async def dispatch_addon_action(self, body):
+                self.received = body
+                return {"ok": True}
+
+        google_chat = FakeGoogleChat()
+        app = _create_app(auth_adapter)
+        app["google_chat_adapter"] = google_chat
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/google-chat/actions",
+                json={"commonEventObject": {"parameters": {"action": "hermes_clarify"}}},
+                headers={"Authorization": "Bearer google-token"},
+            )
+            assert resp.status == 200
+            assert await resp.json() == {"ok": True}
+            assert google_chat.received["commonEventObject"]["parameters"]["action"] == "hermes_clarify"
+
+    @pytest.mark.asyncio
+    async def test_google_chat_action_rejects_api_key_as_google_auth(self, auth_adapter):
+        class FakeGoogleChat:
+            def verify_addon_request(self, auth_header):
+                assert auth_header == "Bearer sk-secret"
+                return "invalid_google_bearer_token"
+
+            async def dispatch_addon_action(self, body):
+                raise AssertionError("dispatch must not run")
+
+        app = _create_app(auth_adapter)
+        app["google_chat_adapter"] = FakeGoogleChat()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/google-chat/actions",
+                json={"ok": True},
+                headers={"Authorization": "Bearer sk-secret"},
+            )
+            assert resp.status == 401
+            data = await resp.json()
+            assert data["error"]["code"] == "invalid_google_bearer_token"
+
+    @pytest.mark.asyncio
+    async def test_google_chat_action_requires_connected_adapter(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/google-chat/actions",
+                json={"ok": True},
+                headers={"Authorization": "Bearer google-token"},
+            )
+            assert resp.status == 503
+
+    @pytest.mark.asyncio
+    async def test_google_chat_action_rejects_malformed_json(self, adapter):
+        class FakeGoogleChat:
+            def verify_addon_request(self, auth_header):
+                return None
+
+            async def dispatch_addon_action(self, body):
+                raise AssertionError("dispatch must not run")
+
+        app = _create_app(adapter)
+        app["google_chat_adapter"] = FakeGoogleChat()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/google-chat/actions",
+                data="{",
+                headers={"Authorization": "Bearer google-token"},
+            )
+            assert resp.status == 400
+
+
+class TestGoogleChatEventEndpoint:
+    @pytest.mark.asyncio
+    async def test_google_chat_event_dispatches_with_google_auth(self, auth_adapter):
+        class FakeGoogleChat:
+            def __init__(self):
+                self.received = None
+
+            def verify_http_event_request(self, auth_header):
+                return None if auth_header == "Bearer google-token" else "invalid_google_bearer_token"
+
+            async def dispatch_http_event(self, body):
+                self.received = body
+                return {"ok": True}
+
+        google_chat = FakeGoogleChat()
+        app = _create_app(auth_adapter)
+        app["google_chat_adapter"] = google_chat
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/google-chat/events",
+                json={"type": "MESSAGE", "message": {"text": "hello"}},
+                headers={"Authorization": "Bearer google-token"},
+            )
+            assert resp.status == 200
+            assert await resp.json() == {"ok": True}
+            assert google_chat.received["type"] == "MESSAGE"
+
+    @pytest.mark.asyncio
+    async def test_google_chat_event_rejects_missing_google_auth(self, auth_adapter):
+        class FakeGoogleChat:
+            def verify_http_event_request(self, auth_header):
+                assert auth_header == ""
+                return "missing_google_bearer_token"
+
+            async def dispatch_http_event(self, body):
+                raise AssertionError("dispatch must not run")
+
+        app = _create_app(auth_adapter)
+        app["google_chat_adapter"] = FakeGoogleChat()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/google-chat/events", json={"ok": True})
+            assert resp.status == 401
+            data = await resp.json()
+            assert data["error"]["code"] == "missing_google_bearer_token"
+
+    @pytest.mark.asyncio
+    async def test_google_chat_event_requires_connected_adapter(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/google-chat/events",
+                json={"ok": True},
+                headers={"Authorization": "Bearer google-token"},
+            )
+            assert resp.status == 503
 
 
 # ---------------------------------------------------------------------------
