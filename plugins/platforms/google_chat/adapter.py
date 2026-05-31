@@ -791,6 +791,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._bot_user_id: Optional[str] = None  # users/{id}
         self._dedup = MessageDeduplicator()
         self._typing_messages: Dict[str, str] = {}
+        self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
         self._rate_limit_hits: Dict[str, int] = {}
         # Last-seen inbound thread name per chat_id (space). Google Chat
@@ -1676,6 +1677,15 @@ class GoogleChatAdapter(BasePlatformAdapter):
             thread_id=session_thread_id,
             user_id_alt=(user.get("name") or None),
         )
+        params = _card_click_parameters(payload)
+        if _card_click_action_name(payload) == "hermes_clarify":
+            await self._dispatch_clarify_card_click(
+                source=source,
+                clarify_id=params.get("clarify_id", ""),
+                choice=params.get("choice", ""),
+                message_name=message_name,
+            )
+            return
         logger.info(
             "[GoogleChat] CARD_CLICKED synthesized action=%s params=%d selections=%d",
             _card_click_action_name(payload) or "<unknown>",
@@ -1691,6 +1701,67 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 raw_message=payload,
             )
         )
+
+    async def _dispatch_clarify_card_click(
+        self,
+        *,
+        source: Any,
+        clarify_id: str,
+        choice: str,
+        message_name: str,
+    ) -> None:
+        if not clarify_id:
+            return
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        auth_fn = getattr(runner, "_is_user_authorized", None)
+        if callable(auth_fn) and not auth_fn(source):
+            await self.send(
+                source.chat_id,
+                "⛔ You are not authorized to answer this prompt.",
+                metadata={"thread_id": source.thread_id} if source.thread_id else None,
+            )
+            return
+
+        if clarify_id not in self._clarify_state:
+            await self.send(
+                source.chat_id,
+                "This prompt has already been resolved.",
+                metadata={"thread_id": source.thread_id} if source.thread_id else None,
+            )
+            return
+
+        if choice == "__other__":
+            try:
+                from tools.clarify_gateway import mark_awaiting_text
+                mark_awaiting_text(clarify_id)
+            except Exception as exc:
+                logger.warning("[GoogleChat] mark_awaiting_text failed: %s", exc)
+            await self.send(
+                source.chat_id,
+                "✏️ Type your answer in the chat.",
+                metadata={"thread_id": source.thread_id} if source.thread_id else None,
+            )
+            return
+
+        try:
+            from tools.clarify_gateway import resolve_gateway_clarify
+            resolved = resolve_gateway_clarify(clarify_id, choice)
+        except Exception as exc:
+            logger.error("[GoogleChat] resolve_gateway_clarify failed: %s", exc)
+            resolved = False
+        self._clarify_state.pop(clarify_id, None)
+        if resolved:
+            await self.send(
+                source.chat_id,
+                f"✓ {choice[:80]}",
+                metadata={"thread_id": source.thread_id} if source.thread_id else None,
+            )
+        else:
+            await self.send(
+                source.chat_id,
+                "This prompt has already been resolved.",
+                metadata={"thread_id": source.thread_id} if source.thread_id else None,
+            )
 
     async def _handle_setup_files_command(
         self,
@@ -2290,6 +2361,73 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 error=_redact_sensitive(str(exc)),
                 retryable=_is_retryable_error(exc),
             )
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if not choices:
+            return await super().send_clarify(
+                chat_id, question, choices, clarify_id, session_key, metadata
+            )
+
+        buttons = []
+        for choice in choices:
+            choice_text = str(choice).strip()
+            if not choice_text:
+                continue
+            label = choice_text if len(choice_text) <= 80 else choice_text[:77] + "..."
+            buttons.append(
+                {
+                    "text": label,
+                    "action": "hermes_clarify",
+                    "parameters": {
+                        "clarify_id": clarify_id,
+                        "choice": choice_text,
+                    },
+                }
+            )
+        buttons.append(
+            {
+                "text": "Other / type answer",
+                "action": "hermes_clarify",
+                "parameters": {
+                    "clarify_id": clarify_id,
+                    "choice": "__other__",
+                },
+            }
+        )
+        if not buttons:
+            return await super().send_clarify(
+                chat_id, question, choices, clarify_id, session_key, metadata
+            )
+
+        card = card_spec_to_cards_v2(
+            {
+                "card_id": f"clarify-{clarify_id}",
+                "header": {"title": "Question"},
+                "sections": [
+                    {
+                        "widgets": [
+                            {"type": "text", "text": f"❓ {question}"},
+                            {"type": "buttons", "buttons": buttons},
+                        ]
+                    }
+                ],
+            }
+        )
+        result = await self.send_card(chat_id, card, metadata=metadata)
+        if result.success:
+            self._clarify_state[clarify_id] = session_key
+            return result
+        return await super().send_clarify(
+            chat_id, question, choices, clarify_id, session_key, metadata
+        )
 
     async def edit_message(
         self,

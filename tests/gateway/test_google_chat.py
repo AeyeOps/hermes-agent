@@ -936,6 +936,46 @@ class TestCardClicks:
         assert event.source.thread_id == thread_name
         assert adapter._last_inbound_thread["spaces/S"] == thread_name
 
+    @pytest.mark.asyncio
+    async def test_dispatch_clarify_card_click_resolves_prompt(self, adapter):
+        from tools.clarify_gateway import register, wait_for_response
+
+        clarify_id = "clarify123"
+        session_key = "agent:main:google_chat:dm:spaces/S"
+        register(
+            clarify_id=clarify_id,
+            session_key=session_key,
+            question="Pick one",
+            choices=["A", "B"],
+        )
+        adapter._clarify_state[clarify_id] = session_key
+        adapter._create_message = AsyncMock(
+            return_value=type(
+                "R",
+                (),
+                {"success": True, "message_id": "m/ack", "error": None},
+            )()
+        )
+
+        await adapter._dispatch_card_click(
+            {
+                "space": {"name": "spaces/S", "spaceType": "DIRECT_MESSAGE"},
+                "user": {"name": "users/123", "email": "u@example.com"},
+                "message": {"name": "spaces/S/messages/CARD.CARD"},
+                "action": {
+                    "function": "hermes_clarify",
+                    "parameters": [
+                        {"key": "clarify_id", "value": clarify_id},
+                        {"key": "choice", "value": "B"},
+                    ],
+                },
+            }
+        )
+
+        assert wait_for_response(clarify_id, timeout=0.1) == "B"
+        assert clarify_id not in adapter._clarify_state
+        adapter.handle_message.assert_not_awaited()
+
 
 # ===========================================================================
 # _build_message_event — payload parsing
@@ -1221,6 +1261,35 @@ class TestSend:
         body = adapter._create_message.await_args.args[1]
         assert body["cardsV2"][0]["cardId"] == "c1"
         assert body["thread"] == {"name": "spaces/S/threads/T"}
+
+    @pytest.mark.asyncio
+    async def test_send_clarify_posts_choice_card(self, adapter):
+        adapter._create_message = AsyncMock(
+            return_value=type(
+                "R",
+                (),
+                {"success": True, "message_id": "m/1", "error": None, "raw_response": None},
+            )()
+        )
+
+        result = await adapter.send_clarify(
+            "spaces/S",
+            "Pick a demo",
+            ["Simple", "Capability test"],
+            "clarify123",
+            "session-key",
+        )
+
+        assert result.success is True
+        body = adapter._create_message.await_args.args[1]
+        card = body["cardsV2"][0]
+        assert card["cardId"] == "clarify-clarify123"
+        buttons = card["card"]["sections"][0]["widgets"][1]["buttonList"]["buttons"]
+        assert buttons[0]["text"] == "Simple"
+        assert buttons[0]["onClick"]["action"]["function"] == "hermes_clarify"
+        assert {"key": "choice", "value": "Simple"} in buttons[0]["onClick"]["action"]["parameters"]
+        assert buttons[-1]["text"] == "Other / type answer"
+        assert adapter._clarify_state["clarify123"] == "session-key"
 
     @pytest.mark.asyncio
     async def test_send_google_chat_card_tool_rejects_malformed_resources(self):
