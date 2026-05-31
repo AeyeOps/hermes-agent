@@ -15,7 +15,7 @@ scratch work live here instead.
 - `googlechat/` — design notes, spec, architecture decisions, and runbooks for
   the Google Chat platform adapter.
 - `portal/` — secured HTTPS exposure plan, Caddy/systemd templates, and
-  headless setup/verify scripts for the Hermes dashboard.
+  headless setup/verify scripts for the Authelia-protected portal stack.
 - `scripts/` — fork-local operational scripts for managing an AEyeOps Hermes
   instance without touching upstream-owned script surfaces.
 
@@ -29,19 +29,17 @@ three web surfaces we expose from a Hermes host:
 - `webui` — `nesquena/hermes-webui`, configured to use Hermes Gateway `/v1`.
 - `mc` — Builderz Mission Control, loopback-only behind Caddy.
 
-All three are fronted by Caddy HTTPS. Fresh AEyeOps installs should use
-`--auth-mode authelia` so the active browser gate is an Authelia login page.
-The installer still writes the Basic Auth Caddy snippets first so Authelia can
-save them as rollback artifacts before it canaries all portal hostnames. Use
-`--auth-mode basic` only for a simple fallback or emergency rollback baseline.
+All three are fronted by Caddy HTTPS and protected by Authelia web login via
+Caddy `forward_auth`. The stack installer writes the Authelia-protected
+Caddy snippets directly; there is no generated browser-owned auth-challenge stage. It also ensures the Hermes API Server is enabled on
+loopback so WebUI uses the same active Hermes model/provider configuration as
+normal Hermes sessions instead of carrying a separate model config.
 
-The script also ensures the Hermes API Server is enabled on loopback so WebUI
-uses the same active Hermes model/provider configuration as normal Hermes
-sessions instead of carrying a separate model config. Hostnames, install
-directories, password files, and API keys belong in host-local `aeyeops/.env`,
-not in the public fork.
-
-Authelia behind Caddy is documented in `aeyeops/portal/authelia-plan.md`.
+Hostnames, install directories, password/hash files, Cloudflare token paths,
+and API keys belong in host-local `aeyeops/.env`, not in the public fork. When
+`AEX_CLOUDFLARE_DNS=auto` and a scoped Cloudflare token is available, the stack
+installer idempotently upserts the app/auth A records before Caddy requests
+certificates.
 
 Dry-run first:
 
@@ -51,9 +49,8 @@ sudo aeyeops/scripts/install-portal-stack.sh \
   --webui-domain webui.example.com \
   --mc-domain mc.example.com \
   --auth-domain auth.example.com \
-  --auth-mode authelia \
   --user operator \
-  --password-file "$HERMES_HOME/.portal-password" \
+  --authelia-password-file "$HERMES_HOME/aeyeops-portal/portal-password" \
   --hermes-home "$HERMES_HOME" \
   --dry-run
 ```
@@ -67,34 +64,22 @@ sudo aeyeops/scripts/install-portal-stack.sh \
   --webui-domain webui.example.com \
   --mc-domain mc.example.com \
   --auth-domain auth.example.com \
-  --auth-mode authelia \
   --user operator \
-  --password-file "$HERMES_HOME/.portal-password" \
+  --authelia-password-file "$HERMES_HOME/aeyeops-portal/portal-password" \
   --hermes-home "$HERMES_HOME" \
   --restart-gateway
 ```
 
-Caddy obtains certificates automatically for the three app hostnames once DNS
-points at the host and inbound 80/443 reach Caddy. Authelia also needs DNS for
-the auth hostname. In Authelia mode the stack installs Authelia when missing by
-default (`AEX_INSTALL_AUTHELIA=1`); use `--skip-authelia-install` only when the
-binary is already installed. The Authelia user password hash is read from
-host-local `AEX_AUTHELIA_USER_PASSWORD_HASH_FILE`,
-`AEX_AUTHELIA_USER_PASSWORD_HASH`, `--authelia-password-hash-file`, or
-`--authelia-password-hash`; keep that value out of git.
+Caddy obtains certificates automatically for the three app hostnames and the
+auth hostname once DNS points at the host and inbound 80/443 reach Caddy. The
+stack installs Authelia when missing by default (`AEX_INSTALL_AUTHELIA=1`); use
+`--skip-authelia-install` only when the binary is already installed. Keep the Authelia password hash and any plaintext password file out of git.
 
-To install only the Basic Auth fallback baseline, pass `--auth-mode basic`.
-Existing Basic Auth-only hosts should set `AEX_PORTAL_AUTH_MODE=basic` before
-routine reruns unless they intentionally want to cut over all portal hostnames
-to Authelia.
+## Authelia portal auth helper
 
-## Authelia login-page staging
-
-`aeyeops/scripts/install-authelia-portal-auth.sh` implements the Authelia
-staging plan from `aeyeops/portal/authelia-plan.md`. The stack installer calls
-it automatically in `--auth-mode authelia`; run it directly for focused
-validation, canary, or rollback work. It keeps Caddy in place and preserves
-Basic Auth snippets as the rollback path.
+`aeyeops/scripts/install-authelia-portal-auth.sh` is the lower-level helper used
+by the stack installer. Run it directly when only the Authelia config/service or
+Caddy protected-host snippets need to be regenerated.
 
 Validate the generated Authelia and Caddy shape without writing live files:
 
@@ -105,56 +90,11 @@ sudo aeyeops/scripts/install-authelia-portal-auth.sh \
   --webui-domain webui.example.com \
   --mc-domain mc.example.com \
   --user operator \
-  --user-password-hash-file "$HERMES_HOME/.authelia-password-hash" \
+  --user-password-hash-file "$HERMES_HOME/aeyeops-portal/authelia-password-hash" \
+  --write-auth-portal \
+  --write-app-snippets \
   --validate-only
 ```
-
-Canary one portal only after the auth portal is installed and reachable:
-
-```bash
-sudo aeyeops/scripts/install-authelia-portal-auth.sh \
-  --auth-domain auth.example.com \
-  --dashboard-domain dashboard.example.com \
-  --webui-domain webui.example.com \
-  --mc-domain mc.example.com \
-  --user operator \
-  --user-password-hash-file "$HERMES_HOME/.authelia-password-hash" \
-  --write-auth-portal \
-  --canary mc
-```
-
-Rollback restores saved Basic Auth snippets:
-
-```bash
-sudo aeyeops/scripts/install-authelia-portal-auth.sh \
-  --auth-domain auth.example.com \
-  --dashboard-domain dashboard.example.com \
-  --webui-domain webui.example.com \
-  --mc-domain mc.example.com \
-  --user operator \
-  --rollback-to-basic-auth \
-  --canary all
-```
-
-## Hermes dashboard / Caddy portal bootstrap
-
-Use the repeatable installer when bringing up the web dashboard on a host. It
-loads optional defaults from ignored `aeyeops/.env`, installs Caddy from the
-official stable package repository on Debian-family systems, configures the
-loopback Hermes dashboard systemd unit, writes the AEyeOps Caddy snippet, and
-runs a local verification probe:
-
-```bash
-sudo aeyeops/scripts/install-caddy-dashboard-proxy.sh \
-  --domain dashboard.example.com \
-  --path-prefix /hermes \
-  --user operator \
-  --password-file "$HERMES_HOME/.portal-password" \
-  --hermes-home "$HERMES_HOME"
-```
-
-Use `--dry-run` first. Keep passwords, hashes, real hostnames, and local paths
-in `aeyeops/.env` or other ignored host-local files, not in tracked docs.
 
 ## Codex → Hermes → LiteLLM auth rebind
 

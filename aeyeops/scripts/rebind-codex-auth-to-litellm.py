@@ -274,18 +274,21 @@ def extract_codex_tokens(path: Path) -> dict[str, Any] | None:
 
 
 def validate_source(source: dict[str, Any], min_ttl_seconds: int) -> dict[str, Any]:
+    def invalid(message: str) -> None:
+        raise ValueError(message)
+
     tokens = source["tokens"]
     access = str(tokens.get("access_token") or "")
     refresh = str(tokens.get("refresh_token") or "")
     ident = str(tokens.get("id_token") or "")
     if not access or not refresh or not ident:
-        fail(f"{source['name']} auth is missing access_token, refresh_token, or id_token")
+        invalid(f"{source['name']} auth is missing access_token, refresh_token, or id_token")
     exp = token_exp(access)
     if exp is None:
-        fail(f"{source['name']} access token has no decodable exp claim")
+        invalid(f"{source['name']} access token has no decodable exp claim")
     now = int(time.time())
     if exp <= now + min_ttl_seconds:
-        fail(
+        invalid(
             f"{source['name']} access token expires too soon "
             f"({iso_from_epoch(exp)}); refresh Codex first"
         )
@@ -295,7 +298,7 @@ def validate_source(source: dict[str, Any], min_ttl_seconds: int) -> dict[str, A
         or account_id_from_token(access)
     )
     if not account_id:
-        fail(f"{source['name']} token has no decodable ChatGPT account id")
+        invalid(f"{source['name']} token has no decodable ChatGPT account id")
     source = dict(source)
     source["expires_at"] = exp
     source["account_id"] = account_id
@@ -309,16 +312,25 @@ def choose_source(
     min_ttl_seconds: int,
 ) -> dict[str, Any]:
     sources: list[dict[str, Any]] = []
+    invalid: dict[str, str] = {}
     for src in (hermes_source, codex_source):
         if src is not None:
-            sources.append(validate_source(src, min_ttl_seconds))
+            try:
+                sources.append(validate_source(src, min_ttl_seconds))
+            except ValueError as exc:
+                invalid[src["name"]] = str(exc)
     if not sources:
-        fail("No usable Hermes or Codex auth tokens found")
+        detail = "; ".join(f"{name}: {reason}" for name, reason in sorted(invalid.items()))
+        fail(f"No usable Hermes or Codex auth tokens found{': ' + detail if detail else ''}")
     if prefer != "newest":
         for src in sources:
             if src["name"] == prefer:
                 return src
+        if prefer in invalid:
+            fail(f"Requested --prefer {prefer}, but that source is unusable: {invalid[prefer]}")
         fail(f"Requested --prefer {prefer}, but that source is unavailable")
+    for name, reason in sorted(invalid.items()):
+        print(f"[observed] skipped_unusable_source={name}: {reason}")
     return max(sources, key=lambda src: parse_time(src.get("last_refresh")) or src.get("mtime", 0.0))
 
 
