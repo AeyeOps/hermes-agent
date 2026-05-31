@@ -135,6 +135,9 @@ from plugins.platforms.google_chat.adapter import (  # noqa: E402
     _is_google_owned_host,
     _mime_for_message_type,
     _redact_sensitive,
+    _synthesize_card_click_text,
+    _send_google_chat_card_tool,
+    card_spec_to_cards_v2,
     check_google_chat_requirements,
 )
 
@@ -549,6 +552,38 @@ class TestOnPubsubMessage:
         with patch.object(adapter, "_submit_on_loop") as submit:
             adapter._on_pubsub_message(msg)
             submit.assert_called_once()
+            submit.call_args.args[0].close()
+        msg.ack.assert_called_once()
+
+    def test_card_click_submits_to_loop(self, adapter):
+        env = {
+            "chat": {
+                "cardClickedPayload": {
+                    "space": {"name": "spaces/S", "spaceType": "SPACE"},
+                    "user": {
+                        "name": "users/123",
+                        "email": "u@example.com",
+                        "displayName": "User",
+                    },
+                    "message": {
+                        "name": "spaces/S/messages/M.M",
+                        "thread": {"name": "spaces/S/threads/T"},
+                    },
+                    "action": {
+                        "function": "approve",
+                        "parameters": [{"key": "id", "value": "42"}],
+                    },
+                }
+            }
+        }
+        msg = _make_pubsub_message(
+            env,
+            attributes={"ce-type": "google.workspace.chat.card.v1.clicked"},
+        )
+        with patch.object(adapter, "_submit_on_loop") as submit:
+            adapter._on_pubsub_message(msg)
+            submit.assert_called_once()
+            submit.call_args.args[0].close()
         msg.ack.assert_called_once()
 
     def test_callback_exception_does_not_escape(self, adapter):
@@ -612,6 +647,48 @@ class TestExtractMessagePayload:
             "space": {"name": "spaces/S"},
         }
         assert GoogleChatAdapter._extract_message_payload(envelope) is None
+
+    def test_workspace_events_format_extracts_msg_and_space(self):
+        envelope = {
+            "@type": "type.googleapis.com/google.chat.v1.MessageCreatedEventData",
+            "subscription": "subscriptions/sub-1",
+            "message": {
+                "name": "spaces/S/messages/M.M",
+                "sender": {
+                    "name": "users/12345",
+                    "email": "alice@example.com",
+                    "displayName": "Alice",
+                    "type": "HUMAN",
+                },
+                "text": "hello",
+                "thread": {"name": "spaces/S/threads/T"},
+                "space": {"name": "spaces/S", "spaceType": "SPACE"},
+            },
+        }
+        result = GoogleChatAdapter._extract_message_payload(envelope)
+        assert result is not None
+        msg, space, fmt = result
+        assert fmt == "workspace_events"
+        assert msg["name"] == "spaces/S/messages/M.M"
+        assert space["name"] == "spaces/S"
+
+    def test_workspace_events_data_wrapper_extracts_msg_and_space(self):
+        envelope = {
+            "subscription": "subscriptions/sub-1",
+            "data": {
+                "message": {
+                    "name": "spaces/S/messages/M.M",
+                    "text": "hello",
+                    "space": {"name": "spaces/S", "spaceType": "SPACE"},
+                }
+            },
+        }
+        result = GoogleChatAdapter._extract_message_payload(envelope)
+        assert result is not None
+        msg, space, fmt = result
+        assert fmt == "workspace_events"
+        assert msg["name"] == "spaces/S/messages/M.M"
+        assert space["name"] == "spaces/S"
 
     def test_relay_flat_format_synthesizes_chat_api_shape(self):
         """Format 3: flat fields from a custom Cloud Run relay.
@@ -723,6 +800,141 @@ class TestExtractMessagePayload:
         """Random JSON with no known shape returns None (caller acks)."""
         envelope = {"foo": "bar", "baz": 123}
         assert GoogleChatAdapter._extract_message_payload(envelope) is None
+
+
+class TestCardClicks:
+    def test_synthesize_card_click_text(self):
+        text = _synthesize_card_click_text(
+            {
+                "action": {
+                    "function": "approve",
+                    "parameters": [{"key": "request", "value": "42"}],
+                },
+                "common": {
+                    "formInputs": {
+                        "decision": {"stringInputs": {"value": ["yes"]}}
+                    }
+                },
+            }
+        )
+        assert "Google Chat card click" in text
+        assert "action: approve" in text
+        assert "- request: 42" in text
+        assert "- decision: yes" in text
+
+    @pytest.mark.asyncio
+    async def test_dispatch_card_click_as_message_event(self, adapter):
+        payload = {
+            "space": {"name": "spaces/S", "spaceType": "SPACE"},
+            "user": {
+                "name": "users/123",
+                "email": "u@example.com",
+                "displayName": "User",
+            },
+            "message": {
+                "name": "spaces/S/messages/M.M",
+                "thread": {"name": "spaces/S/threads/T"},
+            },
+            "action": {
+                "function": "approve",
+                "parameters": [{"key": "request", "value": "42"}],
+            },
+        }
+        await adapter._dispatch_card_click(payload)
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text.startswith("Google Chat card click")
+        assert event.source.platform == _GC
+        assert event.source.chat_id == "spaces/S"
+        assert event.source.thread_id is None
+        assert event.source.user_id == "u@example.com"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_card_click_dedup_is_per_user(self, adapter):
+        payload = {
+            "space": {"name": "spaces/S", "spaceType": "SPACE"},
+            "message": {
+                "name": "spaces/S/messages/M.M",
+                "thread": {"name": "spaces/S/threads/T"},
+            },
+            "action": {"function": "approve"},
+        }
+        first = {
+            **payload,
+            "user": {"name": "users/1", "email": "one@example.com"},
+        }
+        second = {
+            **payload,
+            "user": {"name": "users/2", "email": "two@example.com"},
+        }
+
+        await adapter._dispatch_card_click(first)
+        await adapter._dispatch_card_click(second)
+
+        assert adapter.handle_message.await_count == 2
+        assert (
+            adapter.handle_message.await_args_list[0].args[0].source.user_id
+            == "one@example.com"
+        )
+        assert (
+            adapter.handle_message.await_args_list[1].args[0].source.user_id
+            == "two@example.com"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatch_card_click_dedups_same_user_repeat(self, adapter):
+        payload = {
+            "space": {"name": "spaces/S", "spaceType": "SPACE"},
+            "user": {"name": "users/1", "email": "one@example.com"},
+            "message": {
+                "name": "spaces/S/messages/M.M",
+                "thread": {"name": "spaces/S/threads/T"},
+            },
+            "action": {"function": "approve"},
+        }
+
+        await adapter._dispatch_card_click(payload)
+        await adapter._dispatch_card_click(payload)
+
+        assert adapter.handle_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_dispatch_dm_card_click_keeps_main_flow(self, adapter):
+        thread_name = "spaces/S/threads/BOTCARD"
+        adapter._thread_count_store.incr("spaces/S", thread_name)
+        payload = {
+            "space": {"name": "spaces/S", "spaceType": "DIRECT_MESSAGE"},
+            "user": {"name": "users/123", "email": "u@example.com"},
+            "message": {
+                "name": "spaces/S/messages/CARD.CARD",
+                "thread": {"name": thread_name},
+            },
+            "action": {"function": "approve"},
+        }
+        await adapter._dispatch_card_click(payload)
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.chat_type == "dm"
+        assert event.source.thread_id is None
+        assert "spaces/S" not in adapter._last_inbound_thread
+
+    @pytest.mark.asyncio
+    async def test_dispatch_dm_card_click_preserves_side_thread(self, adapter):
+        thread_name = "spaces/S/threads/SIDE"
+        adapter._thread_count_store.incr("spaces/S", thread_name)
+        adapter._thread_count_store.incr("spaces/S", thread_name)
+        payload = {
+            "space": {"name": "spaces/S", "spaceType": "DIRECT_MESSAGE"},
+            "user": {"name": "users/123", "email": "u@example.com"},
+            "message": {
+                "name": "spaces/S/messages/CARD.CARD",
+                "thread": {"name": thread_name},
+            },
+            "action": {"function": "approve"},
+        }
+        await adapter._dispatch_card_click(payload)
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.chat_type == "dm"
+        assert event.source.thread_id == thread_name
+        assert adapter._last_inbound_thread["spaces/S"] == thread_name
 
 
 # ===========================================================================
@@ -841,18 +1053,61 @@ class TestBuildMessageEvent:
             )
 
     @pytest.mark.asyncio
-    async def test_group_keeps_thread_id_on_source(self, adapter):
-        """In group spaces, threads are real conversational containers —
-        keep thread_id on the source from the FIRST message so different
-        threads get isolated sessions (Telegram forum / Discord thread
-        parity)."""
+    async def test_group_space_replies_at_channel_level(self, adapter):
+        """Space mentions should answer in the channel, not a user-thread."""
         env = _make_chat_envelope(text="ping", thread_name="spaces/G/threads/T1")
         env["chat"]["messagePayload"]["space"]["spaceType"] = "SPACE"
         env["chat"]["messagePayload"]["message"]["space"]["spaceType"] = "SPACE"
         msg = env["chat"]["messagePayload"]["message"]
         event = await adapter._build_message_event(msg, env)
         assert event.source.chat_type == "group"
-        assert event.source.thread_id == "spaces/G/threads/T1"
+        assert event.source.thread_id is None
+        assert "spaces/G" not in adapter._last_inbound_thread
+
+    @pytest.mark.asyncio
+    async def test_group_space_send_omits_thread_even_with_reply_anchor(self, adapter):
+        env = _make_chat_envelope(
+            text="ping",
+            msg_name="spaces/G/messages/M1",
+            thread_name="spaces/G/threads/T1",
+        )
+        env["chat"]["messagePayload"]["space"]["spaceType"] = "SPACE"
+        env["chat"]["messagePayload"]["message"]["space"]["spaceType"] = "SPACE"
+        msg = env["chat"]["messagePayload"]["message"]
+        event = await adapter._build_message_event(msg, env)
+        adapter._create_message = AsyncMock(
+            return_value=type("R", (), {"success": True,
+                                        "message_id": "spaces/G/messages/BOT",
+                                        "error": None})()
+        )
+
+        await adapter.send(
+            event.source.chat_id,
+            "channel response",
+            reply_to=event.message_id,
+            metadata={"notify": True},
+        )
+
+        sent_body = adapter._create_message.await_args.args[1]
+        assert "thread" not in sent_body
+
+    @pytest.mark.asyncio
+    async def test_group_space_typing_omits_thread(self, adapter):
+        env = _make_chat_envelope(text="ping", thread_name="spaces/G/threads/T1")
+        env["chat"]["messagePayload"]["space"]["spaceType"] = "SPACE"
+        env["chat"]["messagePayload"]["message"]["space"]["spaceType"] = "SPACE"
+        msg = env["chat"]["messagePayload"]["message"]
+        event = await adapter._build_message_event(msg, env)
+        adapter._create_message = AsyncMock(
+            return_value=type("R", (), {"success": True,
+                                        "message_id": "spaces/G/messages/THINK",
+                                        "error": None})()
+        )
+
+        await adapter.send_typing(event.source.chat_id, metadata=None)
+
+        sent_body = adapter._create_message.await_args.args[1]
+        assert "thread" not in sent_body
 
     @pytest.mark.asyncio
     async def test_slash_command_yields_command_type(self, adapter):
@@ -900,6 +1155,104 @@ class TestSend:
         result = await adapter.send("spaces/S", "hola")
         adapter._create_message.assert_called()
         assert result.success is True
+
+    def test_card_spec_to_cards_v2_builds_button_card(self):
+        card = card_spec_to_cards_v2(
+            {
+                "card_id": "approval",
+                "header": {"title": "Approve request"},
+                "sections": [
+                    {
+                        "widgets": [
+                            {"type": "text", "text": "Review this item."},
+                            {
+                                "type": "buttons",
+                                "buttons": [
+                                    {
+                                        "text": "Approve",
+                                        "action": "approve",
+                                        "parameters": {"request": "42"},
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                ],
+            }
+        )
+        assert card["cardId"] == "approval"
+        assert card["card"]["header"]["title"] == "Approve request"
+        button = card["card"]["sections"][0]["widgets"][1]["buttonList"]["buttons"][0]
+        assert button["onClick"]["action"]["function"] == "approve"
+        assert button["onClick"]["action"]["parameters"] == [
+            {"key": "request", "value": "42"}
+        ]
+
+    def test_card_spec_rejects_non_object_selection_item(self):
+        with pytest.raises(ValueError, match="selection items must be objects"):
+            card_spec_to_cards_v2(
+                {
+                    "sections": [
+                        {
+                            "widgets": [
+                                {
+                                    "type": "selection",
+                                    "name": "choice",
+                                    "items": ["not-an-object"],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_send_card_posts_cards_v2_with_thread(self, adapter):
+        adapter._create_message = AsyncMock(
+            return_value=type("R", (), {"success": True, "message_id": "m/1",
+                                        "error": None, "raw_response": None})()
+        )
+        result = await adapter.send_card(
+            "spaces/S",
+            {"cardId": "c1", "card": {"sections": [{"widgets": []}]}},
+            metadata={"thread_id": "spaces/S/threads/T"},
+        )
+        assert result.success is True
+        body = adapter._create_message.await_args.args[1]
+        assert body["cardsV2"][0]["cardId"] == "c1"
+        assert body["thread"] == {"name": "spaces/S/threads/T"}
+
+    @pytest.mark.asyncio
+    async def test_send_google_chat_card_tool_rejects_malformed_resources(self):
+        card = {"sections": [{"widgets": [{"type": "text", "text": "hi"}]}]}
+        bad_chat_ids = [
+            "spaces/S?alt=json",
+            "spaces/S#frag",
+            "spaces/S/extra",
+            "spaces/S\nX",
+            " spaces/S",
+            "spaces/S\t",
+            "users/U",
+        ]
+        for chat_id in bad_chat_ids:
+            result = await _send_google_chat_card_tool(
+                {"chat_id": chat_id, "card": card}
+            )
+            assert "chat_id must be" in result
+
+        bad_thread_ids = [
+            "spaces/S/threads/T?alt=json",
+            "spaces/S/threads/T#frag",
+            "spaces/S/threads/T\nX",
+            " spaces/S/threads/T",
+            "spaces/S/threads/T ",
+            "spaces/OTHER/threads/T",
+        ]
+        for thread_id in bad_thread_ids:
+            result = await _send_google_chat_card_tool(
+                {"chat_id": "spaces/S", "thread_id": thread_id, "card": card}
+            )
+            assert "thread_id must belong" in result
 
     @pytest.mark.asyncio
     async def test_create_message_passes_messageReplyOption_when_thread_set(self, adapter):
@@ -2763,6 +3116,8 @@ class TestCronSchedulerRegistry:
                 name = "google_chat-platform"
             manifest = _M()
             _manager = type("_Mgr", (), {"_plugin_platform_names": set()})()
+            def register_tool(self, **_kwargs):
+                pass
             def register_platform(self, **kwargs):
                 from gateway.platform_registry import PlatformEntry
                 entry = PlatformEntry(source="plugin", **kwargs)

@@ -32,7 +32,7 @@ Event type routing
 Inbound envelope carries ``type`` in [MESSAGE, ADDED_TO_SPACE, REMOVED_FROM_SPACE,
 CARD_CLICKED]. Only MESSAGE dispatches to the agent. ADDED_TO_SPACE caches the
 bot's resource name (belt-and-suspenders on top of eager resolution in connect()).
-CARD_CLICKED is ACK'd only in v1 (follow-up PR implements interactivity).
+CARD_CLICKED is converted into a bounded text event for the agent.
 """
 
 from __future__ import annotations
@@ -242,6 +242,18 @@ _RETRY_MAX_DELAY = 8.0
 _RETRY_JITTER = 0.3
 _RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 
+_CARD_WIDGET_TYPES = frozenset({
+    "text",
+    "text_paragraph",
+    "decorated_text",
+    "buttons",
+    "button_list",
+    "selection",
+    "selection_input",
+    "image",
+    "divider",
+})
+
 
 def _is_retryable_error(exc: BaseException) -> bool:
     """Classify outbound API errors as transient (retryable) vs permanent.
@@ -369,6 +381,237 @@ def _mime_for_message_type(mime: str) -> MessageType:
     if mime.startswith("video/"):
         return MessageType.VIDEO
     return MessageType.DOCUMENT
+
+
+def _card_click_action_name(payload: Dict[str, Any]) -> str:
+    action = payload.get("action") or {}
+    return str(
+        action.get("actionMethodName")
+        or action.get("function")
+        or action.get("methodName")
+        or ""
+    ).strip()
+
+
+def _card_click_parameters(payload: Dict[str, Any]) -> Dict[str, str]:
+    action = payload.get("action") or {}
+    raw_params = action.get("parameters") or []
+    if isinstance(raw_params, dict):
+        raw_params = [{"key": key, "value": value} for key, value in raw_params.items()]
+
+    params: Dict[str, str] = {}
+    for item in raw_params:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or item.get("name") or "").strip()
+        if key:
+            params[key] = str(item.get("value", ""))
+    return params
+
+
+def _card_click_form_inputs(payload: Dict[str, Any]) -> Dict[str, List[str]]:
+    common = payload.get("common") or {}
+    raw_inputs = common.get("formInputs") or {}
+    if not isinstance(raw_inputs, dict):
+        return {}
+
+    selections: Dict[str, List[str]] = {}
+    for name, value in raw_inputs.items():
+        if not isinstance(value, dict):
+            continue
+        selected: List[str] = []
+        for input_key in ("stringInputs", "dateTimeInput", "dateInput", "timeInput"):
+            input_value = value.get(input_key)
+            if not isinstance(input_value, dict):
+                continue
+            raw_values = input_value.get("value")
+            if raw_values is None:
+                raw_values = [
+                    input_value.get("msSinceEpoch"),
+                    input_value.get("hours"),
+                    input_value.get("minutes"),
+                ]
+            if not isinstance(raw_values, list):
+                raw_values = [raw_values]
+            selected.extend(str(item) for item in raw_values if item is not None)
+        if selected:
+            selections[str(name)] = selected
+    return selections
+
+
+def _synthesize_card_click_text(payload: Dict[str, Any]) -> str:
+    action_name = _card_click_action_name(payload)
+    params = _card_click_parameters(payload)
+    selections = _card_click_form_inputs(payload)
+    if not action_name and not params and not selections:
+        return ""
+
+    lines = ["Google Chat card click"]
+    if action_name:
+        lines.append(f"action: {action_name}")
+    if params:
+        lines.append("parameters:")
+        for key in sorted(params):
+            lines.append(f"- {key}: {params[key]}")
+    if selections:
+        lines.append("selections:")
+        for key in sorted(selections):
+            lines.append(f"- {key}: {', '.join(selections[key])}")
+    return "\n".join(lines)
+
+
+def _extract_card_clicked_payload(
+    envelope: Dict[str, Any], ce_type: str = ""
+) -> Optional[Dict[str, Any]]:
+    chat_payload = (envelope.get("chat") or {}).get("cardClickedPayload")
+    if isinstance(chat_payload, dict):
+        return chat_payload
+    event_type = str(envelope.get("type") or "").upper()
+    at_type = str(envelope.get("@type") or "")
+    if (
+        event_type == "CARD_CLICKED"
+        or "card" in ce_type.lower()
+        or "widget" in ce_type.lower()
+        or "CardClicked" in at_type
+    ):
+        return envelope
+    return None
+
+
+def _required_str(mapping: Dict[str, Any], key: str, context: str) -> str:
+    value = mapping.get(key)
+    if value is None:
+        raise ValueError(f"{context}.{key} is required")
+    value = str(value).strip()
+    if not value:
+        raise ValueError(f"{context}.{key} is required")
+    return value
+
+
+def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
+    text = _required_str(button, "text", "button")
+    action = _required_str(button, "action", "button")
+    raw_params = button.get("parameters") or {}
+    if not isinstance(raw_params, dict):
+        raise ValueError("button.parameters must be an object")
+    parameters = [
+        {"key": str(key), "value": str(value)}
+        for key, value in sorted(raw_params.items())
+    ]
+    return {
+        "text": text,
+        "onClick": {"action": {"function": action, "parameters": parameters}},
+    }
+
+
+def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(widget, dict):
+        raise ValueError("card widgets must be objects")
+    widget_type = str(widget.get("type") or "").strip()
+    if widget_type not in _CARD_WIDGET_TYPES:
+        raise ValueError(f"unsupported widget type: {widget_type or '<missing>'}")
+
+    if widget_type in {"text", "text_paragraph"}:
+        return {
+            "textParagraph": {
+                "text": GoogleChatAdapter.format_message(
+                    _required_str(widget, "text", "widget")
+                )
+            }
+        }
+    if widget_type == "decorated_text":
+        decorated: Dict[str, Any] = {
+            "text": GoogleChatAdapter.format_message(
+                _required_str(widget, "text", "widget")
+            ),
+            "wrapText": bool(widget.get("wrap_text", True)),
+        }
+        if widget.get("top_label"):
+            decorated["topLabel"] = str(widget["top_label"])
+        if widget.get("bottom_label"):
+            decorated["bottomLabel"] = str(widget["bottom_label"])
+        return {"decoratedText": decorated}
+    if widget_type == "divider":
+        return {"divider": {}}
+    if widget_type == "image":
+        image = {"imageUrl": _required_str(widget, "image_url", "widget")}
+        if widget.get("alt_text"):
+            image["altText"] = str(widget["alt_text"])
+        return {"image": image}
+    if widget_type in {"buttons", "button_list"}:
+        raw_buttons = widget.get("buttons") or []
+        if not isinstance(raw_buttons, list) or not raw_buttons:
+            raise ValueError("button widgets require at least one button")
+        return {
+            "buttonList": {
+                "buttons": [_button_to_chat(btn) for btn in raw_buttons]
+            }
+        }
+    if widget_type in {"selection", "selection_input"}:
+        name = _required_str(widget, "name", "widget")
+        raw_items = widget.get("items") or []
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("selection widgets require at least one item")
+        items: List[Dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise ValueError("selection items must be objects")
+            items.append(
+                {
+                    "text": _required_str(item, "text", "selection item"),
+                    "value": _required_str(item, "value", "selection item"),
+                    "selected": bool(item.get("selected", False)),
+                }
+            )
+        return {
+            "selectionInput": {
+                "name": name,
+                "label": str(widget.get("label") or name),
+                "type": str(widget.get("selection_type") or "CHECK_BOX"),
+                "items": items,
+            }
+        }
+    raise ValueError(f"unsupported widget type: {widget_type}")
+
+
+def card_spec_to_cards_v2(card_spec: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(card_spec, dict):
+        raise ValueError("card must be an object")
+
+    raw_sections = card_spec.get("sections") or []
+    if not isinstance(raw_sections, list) or not raw_sections:
+        raise ValueError("card.sections must contain at least one section")
+
+    sections: List[Dict[str, Any]] = []
+    for section in raw_sections:
+        if not isinstance(section, dict):
+            raise ValueError("card sections must be objects")
+        widgets = section.get("widgets") or []
+        if not isinstance(widgets, list) or not widgets:
+            raise ValueError("card section widgets must contain at least one widget")
+        rendered: Dict[str, Any] = {"widgets": [_widget_to_chat(w) for w in widgets]}
+        if section.get("header"):
+            rendered["header"] = str(section["header"])
+        sections.append(rendered)
+
+    card: Dict[str, Any] = {"sections": sections}
+    header = card_spec.get("header")
+    if header:
+        if not isinstance(header, dict):
+            raise ValueError("card.header must be an object")
+        rendered_header: Dict[str, Any] = {
+            "title": _required_str(header, "title", "card.header")
+        }
+        if header.get("subtitle"):
+            rendered_header["subtitle"] = str(header["subtitle"])
+        if header.get("image_url"):
+            rendered_header["imageUrl"] = str(header["image_url"])
+            rendered_header["imageType"] = str(header.get("image_type") or "SQUARE")
+        if header.get("image_alt_text"):
+            rendered_header["imageAltText"] = str(header["image_alt_text"])
+        card["header"] = rendered_header
+
+    return {"cardId": str(card_spec.get("card_id") or "hermes-card"), "card": card}
 
 
 class _ThreadCountStore:
@@ -1102,6 +1345,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
             {"type": "MESSAGE", "message": {...}, "space": {...}}
 
+        Format 2b — Workspace Events API delivery::
+
+            {"@type": "type.googleapis.com/google.chat.v1.MessageCreatedEventData",
+             "subscription": "...", "message": {...}, "space": {...}}
+
         Format 3 — Relay / flat (a custom Cloud Run relay that flattens the
         Chat event into top-level fields)::
 
@@ -1125,15 +1373,38 @@ class GoogleChatAdapter(BasePlatformAdapter):
             space = msg_payload_wrapper.get("space") or msg.get("space") or {}
             return msg, space, "workspace_addons"
 
-        # Format 2: Native Chat API Pub/Sub. Detected by a top-level
-        # ``message`` object plus a ``type`` field; only MESSAGE events
-        # flow through here.
+        # Format 2/2b: Native Chat API Pub/Sub or Workspace Events API.
         if isinstance(envelope.get("message"), dict):
-            if envelope.get("type", "") != "MESSAGE":
+            at_type = str(envelope.get("@type") or "")
+            is_workspace_event = (
+                at_type.startswith("type.googleapis.com/google.chat")
+                or "subscription" in envelope
+            )
+            if envelope.get("type", "") != "MESSAGE" and not is_workspace_event:
                 return None
             msg = envelope["message"]
             space = envelope.get("space") or msg.get("space") or {}
-            return msg, space, "native_chat_api"
+            return (
+                msg,
+                space,
+                "workspace_events" if is_workspace_event else "native_chat_api",
+            )
+
+        data = envelope.get("data")
+        if isinstance(data, dict) and isinstance(data.get("message"), dict):
+            at_type = str(envelope.get("@type") or data.get("@type") or "")
+            if (
+                at_type.startswith("type.googleapis.com/google.chat")
+                or "subscription" in envelope
+            ):
+                msg = data["message"]
+                space = (
+                    data.get("space")
+                    or envelope.get("space")
+                    or msg.get("space")
+                    or {}
+                )
+                return msg, space, "workspace_events"
 
         # Format 3: Relay / flat. A custom Cloud Run relay typically
         # forwards Chat events with this shape so the bot can run without
@@ -1269,11 +1540,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 message.ack()
                 return
 
-            # --- Card-click events (v2 follow-up) ---
-            if "widget" in ce_type or "card" in ce_type.lower():
-                logger.info(
-                    "[GoogleChat] Card/widget event ack'd (v2 feature, deferred)"
-                )
+            # --- Card-click events ---
+            card_payload = _extract_card_clicked_payload(envelope, ce_type)
+            if card_payload is not None:
+                self._submit_on_loop(self._dispatch_card_click(card_payload))
                 message.ack()
                 return
 
@@ -1360,6 +1630,80 @@ class GoogleChatAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         except Exception:
             logger.exception("[GoogleChat] _dispatch_message failed")
+
+    async def _dispatch_card_click(self, payload: Dict[str, Any]) -> None:
+        synthesized = _synthesize_card_click_text(payload)
+        if not synthesized:
+            logger.debug("[GoogleChat] CARD_CLICKED ignored without action context")
+            return
+
+        message = payload.get("message") or {}
+        message_name = message.get("name", "") or ""
+        user = payload.get("user") or message.get("sender") or {}
+        user_key = user.get("email") or user.get("name") or ""
+        dedup_key = (
+            f"{message_name}:card_click:{user_key}:{synthesized}"
+            if message_name
+            else ""
+        )
+        if dedup_key and self._dedup.is_duplicate(dedup_key):
+            return
+
+        space = payload.get("space") or message.get("space") or {}
+        thread = message.get("thread") or {}
+        space_name = space.get("name") or ""
+        space_type = (space.get("type") or space.get("spaceType") or "").upper()
+        chat_type = "dm" if space_type in {"DIRECT_MESSAGE", "DM"} else "group"
+        thread_name = thread.get("name") or None
+        if chat_type == "dm":
+            # Card clicks on top-level bot cards carry the bot message's
+            # thread. Outbound sends already seed that thread with count=1,
+            # but clicking the card should stay in the main DM session. Only
+            # preserve the thread once prior user/thread activity made it a
+            # side-thread.
+            is_side_thread = (
+                thread_name is not None
+                and self._thread_count_store.get(space_name, thread_name) > 1
+            )
+            session_thread_id = thread_name if is_side_thread else None
+            if thread_name and is_side_thread:
+                self._last_inbound_thread[space_name] = thread_name
+            elif space_name:
+                self._last_inbound_thread.pop(space_name, None)
+        else:
+            session_thread_id = None
+            if space_name:
+                self._last_inbound_thread.pop(space_name, None)
+
+        source = self.build_source(
+            chat_id=space_name,
+            chat_name=space.get("displayName") or space.get("name") or "",
+            chat_type=chat_type,
+            user_id=(user.get("email") or user.get("name") or ""),
+            user_name=(
+                user.get("displayName")
+                or user.get("email")
+                or user.get("name")
+                or ""
+            ),
+            thread_id=session_thread_id,
+            user_id_alt=(user.get("name") or None),
+        )
+        logger.info(
+            "[GoogleChat] CARD_CLICKED synthesized action=%s params=%d selections=%d",
+            _card_click_action_name(payload) or "<unknown>",
+            len(_card_click_parameters(payload)),
+            len(_card_click_form_inputs(payload)),
+        )
+        await self.handle_message(
+            MessageEvent(
+                text=synthesized,
+                message_type=MessageType.TEXT,
+                source=source,
+                message_id=message_name or None,
+                raw_message=payload,
+            )
+        )
 
     async def _handle_setup_files_command(
         self,
@@ -1664,9 +2008,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         #   message). Isolate session by chat_id+thread_id, AND keep
         #   the bot's reply inside that thread.
         #
-        # For groups, threads ARE meaningful conversational containers
-        # (Telegram forum / Discord thread parity); always isolate AND
-        # always reply in-thread.
+        # For Spaces, keep bot replies at the channel/top-level. Google Chat
+        # gives every message a thread.name, but using it makes the app look
+        # like it is replying only to the asker instead of speaking in the
+        # Space. DMs retain the explicit side-thread heuristic above.
         if chat_type == "dm":
             is_side_thread = prev_thread_count > 0
             session_thread_id = thread_name if is_side_thread else None
@@ -1678,10 +2023,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
             elif space_name:
                 self._last_inbound_thread.pop(space_name, None)
         else:
-            session_thread_id = thread_name
-            # Groups always reply in-thread.
-            if thread_name and space_name:
-                self._last_inbound_thread[space_name] = thread_name
+            session_thread_id = None
+            if space_name:
+                self._last_inbound_thread.pop(space_name, None)
 
         source = self.build_source(
             chat_id=space_name,
@@ -1930,6 +2274,35 @@ class GoogleChatAdapter(BasePlatformAdapter):
             return last_result
         finally:
             self.resume_typing_for_chat(chat_id)
+
+    async def send_card(
+        self,
+        chat_id: str,
+        card: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        body: Dict[str, Any] = {"cardsV2": [card]}
+        thread_id = self._resolve_thread_id(None, metadata, chat_id=chat_id)
+        if thread_id:
+            body["thread"] = {"name": thread_id}
+        try:
+            result = await self._create_message(chat_id, body)
+            result.raw_response = result.raw_response or {"cardsV2": body["cardsV2"]}
+            return result
+        except HttpError as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            return SendResult(
+                success=False,
+                error=_redact_sensitive(str(exc)),
+                retryable=status in _RETRYABLE_HTTP_STATUSES,
+            )
+        except Exception as exc:
+            logger.debug("[GoogleChat] send_card failed", exc_info=True)
+            return SendResult(
+                success=False,
+                error=_redact_sensitive(str(exc)),
+                retryable=_is_retryable_error(exc),
+            )
 
     async def edit_message(
         self,
@@ -3228,6 +3601,10 @@ def interactive_setup() -> None:
 # means a tampered chat_id trying to break out of the REST URL path
 # (path traversal, ``?`` query injection, ``#`` fragment truncation).
 _GCHAT_CHAT_ID_RE = re.compile(r"^(?:spaces|users)/[A-Za-z0-9_-]+$")
+_GCHAT_SPACE_ID_RE = re.compile(r"^spaces/[A-Za-z0-9_-]+$")
+_GCHAT_THREAD_ID_RE = re.compile(
+    r"^(?P<space>spaces/[A-Za-z0-9_-]+)/threads/[A-Za-z0-9_-]+$"
+)
 
 
 async def _standalone_send(
@@ -3386,6 +3763,90 @@ async def _standalone_send(
         return {"error": f"Google Chat standalone send failed: {e}"}
 
 
+SEND_GOOGLE_CHAT_CARD_SCHEMA = {
+    "name": "send_google_chat_card",
+    "description": (
+        "Send a constrained Google Chat Card v2 message in the current "
+        "Google Chat space. Use sparingly when a compact card is clearer "
+        "than plain text."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "chat_id": {
+                "type": "string",
+                "description": "Google Chat space resource, e.g. spaces/AAAAabc123.",
+            },
+            "thread_id": {
+                "type": "string",
+                "description": "Optional thread resource, e.g. spaces/AAAAabc123/threads/BBBB.",
+            },
+            "card": {
+                "type": "object",
+                "description": (
+                    "Card spec with optional header and sections. Supported "
+                    "widget types: text, decorated_text, image, divider, "
+                    "buttons, selection."
+                ),
+            },
+        },
+        "required": ["chat_id", "card"],
+    },
+}
+
+
+async def _send_google_chat_card_tool(args: Dict[str, Any], **_kw: Any) -> str:
+    from tools.registry import tool_error, tool_result
+
+    chat_id = str(args.get("chat_id") or "")
+    if chat_id != chat_id.strip():
+        return tool_error("chat_id must be a Google Chat space resource")
+    if not _GCHAT_SPACE_ID_RE.fullmatch(chat_id):
+        return tool_error("chat_id must be a Google Chat space resource")
+
+    thread_id = str(args.get("thread_id") or "")
+    if thread_id and thread_id != thread_id.strip():
+        return tool_error("thread_id must belong to chat_id")
+    thread_match = _GCHAT_THREAD_ID_RE.fullmatch(thread_id) if thread_id else None
+    if thread_id and (thread_match is None or thread_match.group("space") != chat_id):
+        return tool_error("thread_id must belong to chat_id")
+
+    try:
+        card = card_spec_to_cards_v2(args.get("card") or {})
+    except Exception as exc:
+        return tool_error(f"invalid card spec: {exc}")
+
+    try:
+        from gateway.config import Platform
+        from gateway.run import _gateway_runner_ref
+
+        platform = Platform("google_chat")
+        runner = _gateway_runner_ref()
+        adapter = runner.adapters.get(platform) if runner is not None else None
+        if adapter is None:
+            return tool_error(
+                "Google Chat card send requires a live google_chat gateway adapter"
+            )
+
+        metadata = {"thread_id": thread_id} if thread_id else None
+        result = await adapter.send_card(chat_id, card, metadata=metadata)
+    except Exception as exc:
+        logger.warning("[GoogleChat] send_google_chat_card failed", exc_info=True)
+        return tool_error(
+            "Google Chat card send failed: "
+            f"{type(exc).__name__}: {_redact_sensitive(str(exc))}"
+        )
+
+    if not result.success:
+        return tool_error(f"Google Chat card send failed: {result.error}")
+    return tool_result(
+        success=True,
+        platform="google_chat",
+        chat_id=chat_id,
+        message_id=result.message_id,
+    )
+
+
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system at startup.
 
@@ -3395,6 +3856,14 @@ def register(ctx) -> None:
     drives adapter creation at runtime.
     """
     _bridge_legacy_env_aliases()
+    ctx.register_tool(
+        name="send_google_chat_card",
+        toolset="google_chat",
+        schema=SEND_GOOGLE_CHAT_CARD_SCHEMA,
+        handler=_send_google_chat_card_tool,
+        is_async=True,
+        emoji="🃏",
+    )
     ctx.register_platform(
         name="google_chat",
         label="Google Chat",
@@ -3442,14 +3911,14 @@ def register(ctx) -> None:
             "files, include MEDIA:/absolute/path/to/file in your response. "
             "Native file attachments require the user to run /setup-files "
             "once in their own DM — until they do, file requests fall back "
-            "to a text notice with the host path. Do NOT generate interactive "
-            "Card v2 buttons — Google Chat interactivity is not yet supported "
-            "by this gateway; ask for typed confirmations instead. While you "
+            "to a text notice with the host path. Use send_google_chat_card "
+            "only in this Google Chat session for compact cards; card clicks "
+            "arrive back as plain text events. You do not have other Google "
+            "Chat-specific APIs: you cannot search space history, list space "
+            "members, or manage spaces. While you "
             "are generating a response, a 'Hermes is thinking…' marker message "
             "appears in the space and is deleted once your response is ready. "
-            "You do NOT have access to Google Chat-specific APIs — you cannot "
-            "search space history, list space members, or manage spaces. Do "
-            "not promise to perform these actions; explain that you can only "
+            "Do not promise unsupported Chat actions; explain that you can only "
             "read messages sent directly to you and respond in the same "
             "space/thread."
         ),

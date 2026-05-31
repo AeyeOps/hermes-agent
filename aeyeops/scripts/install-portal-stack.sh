@@ -3,79 +3,77 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AEEYEOPS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-DASHBOARD_INSTALLER="$AEEYEOPS_DIR/scripts/install-caddy-dashboard-proxy.sh"
 AUTHELIA_INSTALLER="$AEEYEOPS_DIR/scripts/install-authelia-portal-auth.sh"
-VERIFY_SCRIPT="$AEEYEOPS_DIR/portal/scripts/verify-dashboard-proxy.sh"
+CLOUDFLARE_DNS_HELPER="$AEEYEOPS_DIR/scripts/ensure-cloudflare-dns.py"
+VERIFY_SCRIPT="$AEEYEOPS_DIR/portal/scripts/verify-portal-stack.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: install-portal-stack.sh --dashboard-domain DOMAIN --webui-domain DOMAIN --mc-domain DOMAIN --user USER [--password-file PATH | --password-hash HASH | --password-hash-file PATH] [options]
+Usage: install-portal-stack.sh --dashboard-domain DOMAIN --webui-domain DOMAIN --mc-domain DOMAIN --auth-domain DOMAIN --user USER --authelia-password-hash-file PATH [options]
 
-Installs/configures the AEyeOps web portal stack behind Caddy HTTPS:
+Installs/configures the AEyeOps web portal stack behind Caddy HTTPS and an
+Authelia web login page:
   dashboard  -> built-in Hermes dashboard on loopback
   webui      -> nesquena/hermes-webui on loopback, optionally via Hermes Gateway /v1
   mc         -> builderz-labs Mission Control on loopback
+  auth       -> Authelia on loopback
 
-The script is repeatable and public-fork safe: real domains, passwords, API keys,
-local install paths, and service choices come from arguments or host-local
-./aeyeops/.env only. Caddy obtains public TLS certificates automatically once DNS
-points at this host and ports 80/443 are reachable.
+The script is repeatable and public-fork safe: real domains, password hashes,
+API keys, local install paths, and service choices come from arguments or
+host-local ./aeyeops/.env only. Caddy obtains public TLS certificates
+automatically once DNS points at this host and ports 80/443 are reachable.
 
 Required unless provided by aeyeops/.env or environment:
-  --dashboard-domain DOMAIN    Public hostname for Hermes dashboard
-  --webui-domain DOMAIN        Public hostname for Hermes WebUI
-  --mc-domain DOMAIN           Public hostname for Mission Control
-  --user USER                  Caddy Basic Auth username
-  --password-file PATH         File containing plaintext Basic Auth password;
-                               hashed locally after Caddy is installed
-  --password-hash HASH         Output from: caddy hash-password; less preferred
-  --password-hash-file PATH    File containing the Caddy password hash
+  --dashboard-domain DOMAIN         Public hostname for Hermes dashboard
+  --webui-domain DOMAIN             Public hostname for Hermes WebUI
+  --mc-domain DOMAIN                Public hostname for Mission Control
+  --auth-domain DOMAIN              Public hostname for Authelia login
+  --user USER                       Authelia username
+  --authelia-password-hash-file PATH
+                                    File containing Authelia-compatible password hash
 
 Options:
-  --hermes-home PATH           Hermes home (default: $HERMES_HOME or $HOME/.hermes)
-  --repo-dir PATH              Hermes repo dir (default: HERMES_HOME/hermes-agent)
-  --dashboard-port PORT        Local dashboard port (default: 9119)
-  --webui-port PORT            Local WebUI port (default: 8787)
-  --mc-port PORT               Local Mission Control port (default: 3000)
-  --api-port PORT              Hermes API Server port (default: 8642)
-  --install-root PATH          App checkout root (default: $HOME/.local/share/aeyeops)
-  --webui-dir PATH             Hermes WebUI checkout dir
-  --mc-dir PATH                Mission Control checkout dir
-  --webui-repo URL             Hermes WebUI git repo URL
-  --mc-repo URL                Mission Control git repo URL
-  --webui-ref REF              Hermes WebUI git ref (default: master)
-  --mc-ref REF                 Mission Control git ref (default: main)
-  --api-key-file PATH          File containing Hermes API_SERVER_KEY for WebUI bridge
-  --auth-mode authelia|basic   Public authentication mode (default: authelia)
-                               authelia installs Basic Auth snippets as rollback,
-                               then cuts active public auth to Authelia
-  --auth-domain DOMAIN         Authelia login hostname for --auth-mode authelia
-                               (env: AEX_AUTHELIA_DOMAIN)
-  --authelia-password-hash-file PATH
-                               Authelia user password hash file
-  --authelia-password-hash HASH
-                               Authelia user password hash; use env/file when possible
-  --install-authelia           Install Authelia when missing (default in authelia mode)
-  --skip-authelia-install      Require an existing Authelia binary
-  --restart-gateway           Restart hermes-gateway after enabling API server
-  --skip-caddy-install        Do not install/enable Caddy; only configure it
-  --skip-app-install          Do not clone/build apps; only write units/proxy config
-  --skip-mc-build             Skip pnpm install/build for Mission Control
-  --skip-verify               Skip local post-install verification probes
-  --dry-run                   Print planned commands/configuration only
-  --yes                       Accepted for CI/headless callers; no prompts are used
-  -h, --help                  Show this help
+  --authelia-password-hash HASH     Authelia user password hash; use env/file when possible
+  --authelia-password-file PATH     Plaintext password file; hashed locally with Authelia
+  --ensure-cloudflare-dns           Upsert dashboard/webui/mc/auth A records using Cloudflare
+  --skip-cloudflare-dns             Do not attempt Cloudflare DNS automation
+  --portal-origin-ip IP|auto        DNS A-record target (default: auto public IP)
+  --hermes-home PATH                Hermes home (default: $HERMES_HOME or $HOME/.hermes)
+  --repo-dir PATH                   Hermes repo dir (default: HERMES_HOME/hermes-agent)
+  --dashboard-port PORT             Local dashboard port (default: 9119)
+  --webui-port PORT                 Local WebUI port (default: 8787)
+  --mc-port PORT                    Local Mission Control port (default: 3000)
+  --api-port PORT                   Hermes API Server port (default: 8642)
+  --authelia-port PORT              Local Authelia port (default: 9091)
+  --install-root PATH               App checkout root (default: $HOME/.local/share/aeyeops)
+  --webui-dir PATH                  Hermes WebUI checkout dir
+  --mc-dir PATH                     Mission Control checkout dir
+  --webui-repo URL                  Hermes WebUI git repo URL
+  --mc-repo URL                     Mission Control git repo URL
+  --webui-ref REF                   Hermes WebUI git ref (default: master)
+  --mc-ref REF                      Mission Control git ref (default: main)
+  --api-key-file PATH               File containing Hermes API_SERVER_KEY for WebUI bridge
+  --install-authelia                Install Authelia when missing (default)
+  --skip-authelia-install           Require an existing Authelia binary
+  --restart-gateway                 Restart hermes-gateway after enabling API server
+  --skip-caddy-install              Do not install/enable Caddy; only configure it
+  --skip-app-install                Do not clone/build apps; only write units/proxy config
+  --skip-mc-build                   Skip pnpm install/build for Mission Control
+  --skip-verify                     Skip local post-install verification probes
+  --dry-run                         Print planned commands/configuration only
+  --yes                             Accepted for CI/headless callers; no prompts are used
+  -h, --help                        Show this help
 
 Useful host-local env keys loaded from aeyeops/.env when present:
-  AEX_DASHBOARD_DOMAIN, AEX_WEBUI_DOMAIN, AEX_MC_DOMAIN,
-  AEX_PORTAL_AUTH_USER, AEX_PORTAL_PASSWORD_FILE,
-  AEX_PORTAL_PASSWORD_HASH_FILE, AEX_PORTAL_PASSWORD_HASH,
-  AEX_PORTAL_AUTH_MODE, AEX_AUTHELIA_DOMAIN, AEX_INSTALL_AUTHELIA,
-  AEX_AUTHELIA_USER_PASSWORD_HASH_FILE, AEX_AUTHELIA_USER_PASSWORD_HASH,
+  AEX_DASHBOARD_DOMAIN, AEX_WEBUI_DOMAIN, AEX_MC_DOMAIN, AEX_AUTHELIA_DOMAIN,
+  AEX_AUTHELIA_USER, AEX_AUTHELIA_USER_PASSWORD_HASH_FILE,
+  AEX_AUTHELIA_USER_PASSWORD_HASH, AEX_AUTHELIA_USER_PASSWORD_FILE,
+  AEX_INSTALL_AUTHELIA, AEX_CLOUDFLARE_DNS,
+  AEX_CLOUDFLARE_KEYS_FILE, AEX_PORTAL_ORIGIN_IP,
   AEX_DASHBOARD_PORT, AEX_WEBUI_PORT, AEX_MC_PORT, AEX_HERMES_API_PORT,
-  AEX_INSTALL_ROOT, AEX_WEBUI_DIR, AEX_MC_DIR, AEX_WEBUI_REPO,
-  AEX_MC_REPO, AEX_WEBUI_REF, AEX_MC_REF, AEX_HERMES_API_KEY_FILE,
-  HERMES_HOME, HERMES_REPO_DIR
+  AEX_AUTHELIA_PORT, AEX_INSTALL_ROOT, AEX_WEBUI_DIR, AEX_MC_DIR,
+  AEX_WEBUI_REPO, AEX_MC_REPO, AEX_WEBUI_REF, AEX_MC_REF,
+  AEX_HERMES_API_KEY_FILE, HERMES_HOME, HERMES_REPO_DIR
 USAGE
 }
 
@@ -87,23 +85,15 @@ load_local_env() {
   [[ -f "$env_file" ]] || return 0
   local line key value
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
-    key="${line%%=*}"
-    value="${line#*=}"
-    key="${key#"${key%%[![:space:]]*}"}"
-    key="${key%"${key##*[![:space:]]}"}"
-    key="${key#export }"
+    key="${line%%=*}"; value="${line#*=}"; key="${key#export }"
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     [[ -z "${!key+x}" ]] || continue
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-      value="${value:1:${#value}-2}"
-    elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
-      value="${value:1:${#value}-2}"
-    fi
+    value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" == \"*\" && "$value" == *\" ]]; then value="${value:1:${#value}-2}"; fi
+    if [[ "$value" == \'*\' && "$value" == *\' ]]; then value="${value:1:${#value}-2}"; fi
     export "$key=$value"
   done < "$env_file"
 }
@@ -118,8 +108,7 @@ run() {
 write_file() {
   local path="$1" mode="$2"
   shift 2
-  local redacts=("$@")
-  local tmp
+  local redacts=("$@") tmp
   tmp="$(mktemp)"
   cat > "$tmp"
   log "write $path"
@@ -149,7 +138,7 @@ redacted_args_for_log() {
     fi
     out+=("$arg")
     case "$arg" in
-      --password-hash|--user-password-hash|--authelia-password-hash) redact_next=1 ;;
+      --user-password-hash|--authelia-password-hash) redact_next=1 ;;
     esac
   done
   printf '%s ' "${out[@]}"
@@ -157,6 +146,7 @@ redacted_args_for_log() {
 
 validate_domain() {
   local label="$1" domain="$2"
+  [[ -n "$domain" ]] || fail "$label is required."
   if [[ ${#domain} -gt 253 || ! "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]; then
     fail "$label must be a clean hostname like dashboard.example.com."
   fi
@@ -170,8 +160,8 @@ validate_port() {
 
 validate_password_hash() {
   local hash="$1"
-  if [[ ${#hash} -gt 256 || ! "$hash" =~ ^\$[A-Za-z0-9\$./=,+_-]{10,255}$ ]]; then
-    fail "Password hash must look like Caddy hash-password output and must not contain whitespace or Caddyfile syntax."
+  if [[ ${#hash} -gt 300 || ! "$hash" =~ ^\$[A-Za-z0-9\$./=,+_-]{20,300}$ ]]; then
+    fail "Authelia password hash must look like Argon2/bcrypt/scrypt/PBKDF2 output and must not contain whitespace or Caddyfile syntax."
   fi
 }
 
@@ -231,20 +221,6 @@ ensure_caddy_import() {
   fi
 }
 
-protect_caddy_site_file() {
-  local path="$1"
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "protect $path as root:caddy 0640 when caddy group exists"
-    return 0
-  fi
-  if getent group caddy >/dev/null 2>&1; then
-    chgrp caddy "$path"
-    chmod 0640 "$path"
-  else
-    fail "Missing caddy group; refusing to leave password hash in a broadly readable site file."
-  fi
-}
-
 ensure_caddy_log_dir() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     log "ensure /var/log/caddy and existing Caddy access logs are writable by caddy"
@@ -254,13 +230,6 @@ ensure_caddy_log_dir() {
   if getent group caddy >/dev/null 2>&1 && id caddy >/dev/null 2>&1; then
     chown caddy:caddy /var/log/caddy
     find /var/log/caddy -maxdepth 1 -type f -name '*access.log*' -exec chown caddy:caddy {} + -exec chmod 0644 {} +
-  fi
-}
-
-backup_if_exists() {
-  local path="$1"
-  if [[ -e "$path" ]]; then
-    run cp -p "$path" "$path.aeyeops-portal-bak-$TS"
   fi
 }
 
@@ -344,10 +313,6 @@ ensure_git_checkout() {
 }
 
 ensure_node_and_pnpm() {
-  # Mission Control requires Node >=22 and pnpm. Prefer the Hermes-bundled
-  # Node toolchain when present, then make it visible to root/systemd through
-  # /usr/local/bin so repeat runs and service launches do not depend on an
-  # interactive shell's PATH.
   local node_dir="${AEX_NODE_BIN_DIR:-$HERMES_HOME/node/bin}"
   PORTAL_NODE_PATH="$node_dir:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   export PATH="$PORTAL_NODE_PATH"
@@ -406,46 +371,57 @@ find_repo_python() {
     printf '%s\n' "$REPO_DIR/.venv/bin/python"
   elif [[ -x "$REPO_DIR/venv/bin/python" ]]; then
     printf '%s\n' "$REPO_DIR/venv/bin/python"
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '%s\n' "$REPO_DIR/.venv/bin/python"
   else
     fail "Hermes venv python not found/executable under: $REPO_DIR/.venv or $REPO_DIR/venv"
   fi
 }
 
-resolve_password_hash_for_stack() {
-  if [[ -n "$PASSWORD_HASH_FILE" ]]; then
-    [[ -r "$PASSWORD_HASH_FILE" ]] || fail "Password hash file is not readable."
-    PASSWORD_HASH="$(tr -d '\r\n' < "$PASSWORD_HASH_FILE")"
-    validate_password_hash "$PASSWORD_HASH"
-    return 0
+ensure_cloudflare_dns() {
+  case "$CLOUDFLARE_DNS" in
+    0|false|no|skip) log "skipping Cloudflare DNS automation by request"; return 0 ;;
+    1|true|yes|auto) ;;
+    *) fail "AEX_CLOUDFLARE_DNS must be auto, 1/0, true/false, yes/no, or skip." ;;
+  esac
+  [[ -x "$CLOUDFLARE_DNS_HELPER" ]] || fail "Cloudflare DNS helper not found/executable: $CLOUDFLARE_DNS_HELPER"
+  local dns_args=(
+    --keys-file "$CLOUDFLARE_KEYS_FILE"
+    --origin-ip "$PORTAL_ORIGIN_IP"
+    "$DASHBOARD_DOMAIN"
+    "$WEBUI_DOMAIN"
+    "$MC_DOMAIN"
+    "$AUTHELIA_DOMAIN"
+  )
+  if [[ -n "$CLOUDFLARE_ZONE_NAME" ]]; then
+    dns_args=(--zone-name "$CLOUDFLARE_ZONE_NAME" "${dns_args[@]}")
   fi
-  if [[ -n "$PASSWORD_HASH" ]]; then
-    validate_password_hash "$PASSWORD_HASH"
-    return 0
+  if [[ -n "$CLOUDFLARE_ZONE_ID" ]]; then
+    dns_args=(--zone-id "$CLOUDFLARE_ZONE_ID" "${dns_args[@]}")
   fi
-  [[ -n "$PASSWORD_FILE" ]] || fail "Missing password hash source."
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    # shellcheck disable=SC2016 # Literal placeholder, not a shell variable.
-    PASSWORD_HASH='$DRY_RUN_GENERATED_PASSWORD_HASH'
+    log "dry-run: would upsert Cloudflare A records for dashboard/webui/mc/auth when credentials are available"
     return 0
   fi
-  [[ -r "$PASSWORD_FILE" ]] || fail "Password file is not readable."
-  command -v caddy >/dev/null 2>&1 || fail "caddy is not installed; cannot hash --password-file."
-  PASSWORD_HASH="$(caddy hash-password < "$PASSWORD_FILE" | tr -d '\r\n')"
-  validate_password_hash "$PASSWORD_HASH"
+  log "+ $CLOUDFLARE_DNS_HELPER --keys-file <host-local> --origin-ip <redacted> $DASHBOARD_DOMAIN $WEBUI_DOMAIN $MC_DOMAIN $AUTHELIA_DOMAIN"
+  "$CLOUDFLARE_DNS_HELPER" "${dns_args[@]}"
 }
 
-preflight_authelia_apply_inputs() {
-  [[ "$AUTH_MODE" == "authelia" ]] || return 0
+preflight_authelia_inputs() {
   [[ -x "$AUTHELIA_INSTALLER" ]] || fail "Authelia installer not found/executable: $AUTHELIA_INSTALLER"
-  [[ -n "$AUTHELIA_DOMAIN" ]] || fail "--auth-domain or AEX_AUTHELIA_DOMAIN is required when --auth-mode authelia."
+  [[ -n "$AUTHELIA_DOMAIN" ]] || fail "--auth-domain or AEX_AUTHELIA_DOMAIN is required."
   if [[ "$DRY_RUN" -eq 0 ]]; then
     if [[ -n "$AUTHELIA_PASSWORD_HASH_FILE" ]]; then
       [[ -r "$AUTHELIA_PASSWORD_HASH_FILE" ]] || fail "Authelia password hash file is not readable: $AUTHELIA_PASSWORD_HASH_FILE"
-    elif [[ -z "$AUTHELIA_PASSWORD_HASH" ]]; then
-      fail "AEX_AUTHELIA_USER_PASSWORD_HASH_FILE or AEX_AUTHELIA_USER_PASSWORD_HASH is required when applying --auth-mode authelia."
+    elif [[ -n "$AUTHELIA_PASSWORD_HASH" ]]; then
+      :
+    elif [[ -n "$AUTHELIA_PASSWORD_FILE" ]]; then
+      [[ -r "$AUTHELIA_PASSWORD_FILE" ]] || fail "Authelia password file is not readable: $AUTHELIA_PASSWORD_FILE"
+    else
+      fail "AEX_AUTHELIA_USER_PASSWORD_HASH_FILE, AEX_AUTHELIA_USER_PASSWORD_HASH, or AEX_AUTHELIA_USER_PASSWORD_FILE is required."
     fi
     if [[ "$INSTALL_AUTHELIA" -eq 0 ]] && ! command -v authelia >/dev/null 2>&1; then
-      fail "Authelia is not installed. Remove --skip-authelia-install or install Authelia before applying --auth-mode authelia."
+      fail "Authelia is not installed. Remove --skip-authelia-install or install Authelia before applying."
     fi
   fi
 }
@@ -474,29 +450,31 @@ configure_hermes_api_server() {
   upsert_env_value "$env_file" API_SERVER_MODEL_NAME hermes-agent 0600
 }
 
-write_dashboard() {
-  local dash_args=(
-    --domain "$DASHBOARD_DOMAIN"
-    --user "$AUTH_USER"
-    --hermes-home "$HERMES_HOME"
-    --repo-dir "$REPO_DIR"
-    --port "$DASHBOARD_PORT"
-    --skip-verify
-    --yes
-  )
-  if [[ "$SKIP_CADDY_INSTALL" -eq 1 ]]; then
-    dash_args+=(--skip-caddy-install)
-  fi
-  if [[ -n "$PASSWORD_HASH_FILE" ]]; then
-    dash_args+=(--password-hash-file "$PASSWORD_HASH_FILE")
-  elif [[ -n "$PASSWORD_HASH" ]]; then
-    dash_args+=(--password-hash "$PASSWORD_HASH")
-  else
-    dash_args+=(--password-file "$PASSWORD_FILE")
-  fi
-  [[ "$DRY_RUN" -eq 1 ]] && dash_args+=(--dry-run)
-  log "+ $DASHBOARD_INSTALLER $(redacted_args_for_log "${dash_args[@]}")"
-  "$DASHBOARD_INSTALLER" "${dash_args[@]}"
+write_dashboard_service() {
+  local python_bin dashboard_args
+  python_bin="$(find_repo_python)"
+  dashboard_args="dashboard --host 127.0.0.1 --port $DASHBOARD_PORT --no-open"
+  write_file /etc/systemd/system/hermes-dashboard.service 0644 <<UNIT
+[Unit]
+Description=Hermes dashboard (loopback only)
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HERMES_HOME=$HERMES_HOME
+WorkingDirectory=$REPO_DIR
+ExecStart=$python_bin -m hermes_cli.main $dashboard_args
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=$HERMES_HOME
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 }
 
 write_webui_service() {
@@ -537,8 +515,7 @@ UNIT
 }
 
 write_mc_service() {
-  local env_file="$ENV_DIR/mission-control.env"
-  local mc_home
+  local env_file="$ENV_DIR/mission-control.env" mc_home mc_api_key mc_auth_secret
   if [[ "$(basename "$HERMES_HOME")" == ".hermes" ]]; then
     mc_home="$(dirname "$HERMES_HOME")"
   else
@@ -546,21 +523,13 @@ write_mc_service() {
     log "WARN: HERMES_HOME does not end in .hermes; Mission Control Hermes scanners expect HOME/.hermes. Set AEX_MC_HOME if needed."
   fi
   mc_home="${AEX_MC_HOME:-$mc_home}"
-  local mc_api_key="${AEX_MC_API_KEY:-}"
+  mc_api_key="${AEX_MC_API_KEY:-}"
   if [[ -z "$mc_api_key" ]]; then
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-      mc_api_key='DRY_RUN_GENERATED_MC_API_KEY'
-    else
-      mc_api_key="$(random_secret)"
-    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then mc_api_key='DRY_RUN_GENERATED_MC_API_KEY'; else mc_api_key="$(random_secret)"; fi
   fi
-  local mc_auth_secret="${AEX_MC_AUTH_SECRET:-}"
+  mc_auth_secret="${AEX_MC_AUTH_SECRET:-}"
   if [[ -z "$mc_auth_secret" ]]; then
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-      mc_auth_secret='DRY_RUN_GENERATED_MC_AUTH_SECRET'
-    else
-      mc_auth_secret="$(random_secret)"
-    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then mc_auth_secret='DRY_RUN_GENERATED_MC_AUTH_SECRET'; else mc_auth_secret="$(random_secret)"; fi
   fi
   write_file "$env_file" 0600 "$mc_api_key" "$mc_auth_secret" <<ENV
 NODE_ENV=production
@@ -598,46 +567,9 @@ WantedBy=multi-user.target
 UNIT
 }
 
-write_proxy_snippet() {
-  local name="$1" domain="$2" port="$3" log_name="$4"
-  local site_file="/etc/caddy/conf.d/aeyeops-${name}.caddy"
-  backup_if_exists "$site_file"
-  write_file "$site_file" 0640 "$PASSWORD_HASH" <<CADDY
-$domain {
-	encode zstd gzip
-
-	log {
-		output file /var/log/caddy/${log_name}-access.log {
-			roll_size 10MiB
-			roll_keep 5
-			roll_keep_for 720h
-		}
-		format console
-	}
-
-	basic_auth {
-		$AUTH_USER $PASSWORD_HASH
-	}
-
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		Referrer-Policy "no-referrer"
-		X-Frame-Options "DENY"
-	}
-
-	reverse_proxy 127.0.0.1:$port {
-		header_up X-Forwarded-Proto https
-		header_up X-Forwarded-Host {host}
-	}
-}
-CADDY
-  protect_caddy_site_file "$site_file"
-}
-
 write_logrotate() {
   write_file /etc/logrotate.d/aeyeops-portal-stack 0644 <<LOGROTATE
-$HERMES_HOME/logs/aeyeops-portal-*.log /var/log/caddy/aeyeops-*-access.log /var/log/caddy/hermes-webui-access.log /var/log/caddy/mission-control-access.log {
+$HERMES_HOME/logs/aeyeops-portal-*.log /var/log/caddy/aeyeops-*-access.log /var/log/caddy/hermes-dashboard-access.log /var/log/caddy/hermes-webui-access.log /var/log/caddy/mission-control-access.log {
     daily
     rotate 14
     missingok
@@ -650,11 +582,7 @@ $HERMES_HOME/logs/aeyeops-portal-*.log /var/log/caddy/aeyeops-*-access.log /var/
 LOGROTATE
 }
 
-run_authelia_cutover() {
-  [[ "$AUTH_MODE" == "authelia" ]] || return 0
-  [[ -x "$AUTHELIA_INSTALLER" ]] || fail "Authelia installer not found/executable: $AUTHELIA_INSTALLER"
-  [[ -n "$AUTHELIA_DOMAIN" ]] || fail "--auth-domain or AEX_AUTHELIA_DOMAIN is required when --auth-mode authelia."
-
+run_authelia_install() {
   local authelia_args=(
     --auth-domain "$AUTHELIA_DOMAIN"
     --dashboard-domain "$DASHBOARD_DOMAIN"
@@ -662,11 +590,12 @@ run_authelia_cutover() {
     --mc-domain "$MC_DOMAIN"
     --user "$AUTH_USER"
     --hermes-home "$HERMES_HOME"
+    --authelia-port "$AUTHELIA_PORT"
     --dashboard-port "$DASHBOARD_PORT"
     --webui-port "$WEBUI_PORT"
     --mc-port "$MC_PORT"
     --write-auth-portal
-    --canary all
+    --write-app-snippets
     --yes
   )
   if [[ "$INSTALL_AUTHELIA" -eq 1 ]]; then
@@ -678,53 +607,29 @@ run_authelia_cutover() {
     authelia_args+=(--user-password-hash-file "$AUTHELIA_PASSWORD_HASH_FILE")
   elif [[ -n "$AUTHELIA_PASSWORD_HASH" ]]; then
     authelia_args+=(--user-password-hash "$AUTHELIA_PASSWORD_HASH")
+  elif [[ -n "$AUTHELIA_PASSWORD_FILE" ]]; then
+    authelia_args+=(--user-password-file "$AUTHELIA_PASSWORD_FILE")
   fi
   [[ "$DRY_RUN" -eq 1 ]] && authelia_args+=(--dry-run)
 
-  log "auth-mode=authelia: preserving Basic Auth snippets as rollback artifacts, then enabling Authelia web login"
+  log "installing Authelia web login and protected Caddy snippets"
   log "+ $AUTHELIA_INSTALLER $(redacted_args_for_log "${authelia_args[@]}")"
   "$AUTHELIA_INSTALLER" "${authelia_args[@]}"
 }
 
-rollback_authelia_cutover() {
-  [[ "$AUTH_MODE" == "authelia" && "$DRY_RUN" -eq 0 ]] || return 0
-  log "Authelia cutover failed; attempting rollback to saved Basic Auth snippets"
-  "$AUTHELIA_INSTALLER" \
-    --auth-domain "$AUTHELIA_DOMAIN" \
-    --dashboard-domain "$DASHBOARD_DOMAIN" \
-    --webui-domain "$WEBUI_DOMAIN" \
-    --mc-domain "$MC_DOMAIN" \
-    --dashboard-port "$DASHBOARD_PORT" \
-    --webui-port "$WEBUI_PORT" \
-    --mc-port "$MC_PORT" \
-    --user "$AUTH_USER" \
-    --hermes-home "$HERMES_HOME" \
-    --rollback-to-basic-auth \
-    --canary all \
-    --yes || log "Rollback attempt failed; inspect Caddy snippets and Authelia logs before retrying."
-}
-
-run_authelia_cutover_with_rollback() {
-  if ! run_authelia_cutover; then
-    rollback_authelia_cutover
-    fail "Authelia cutover failed; Basic Auth rollback was attempted."
-  fi
-}
-
 load_local_env
 
-DASHBOARD_DOMAIN="${AEX_DASHBOARD_DOMAIN:-${AEX_PORTAL_DOMAIN:-}}"
+DASHBOARD_DOMAIN="${AEX_DASHBOARD_DOMAIN:-}"
 WEBUI_DOMAIN="${AEX_WEBUI_DOMAIN:-}"
 MC_DOMAIN="${AEX_MC_DOMAIN:-}"
-AUTH_USER="${AEX_PORTAL_AUTH_USER:-}"
-PASSWORD_HASH="${AEX_PORTAL_PASSWORD_HASH:-}"
-PASSWORD_HASH_FILE="${AEX_PORTAL_PASSWORD_HASH_FILE:-}"
-PASSWORD_FILE="${AEX_PORTAL_PASSWORD_FILE:-}"
+AUTHELIA_DOMAIN="${AEX_AUTHELIA_DOMAIN:-}"
+AUTH_USER="${AEX_AUTHELIA_USER:-}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 REPO_DIR="${HERMES_REPO_DIR:-}"
-DASHBOARD_PORT="${AEX_DASHBOARD_PORT:-${AEX_PORTAL_PORT:-9119}}"
+DASHBOARD_PORT="${AEX_DASHBOARD_PORT:-9119}"
 WEBUI_PORT="${AEX_WEBUI_PORT:-8787}"
 MC_PORT="${AEX_MC_PORT:-3000}"
+AUTHELIA_PORT="${AEX_AUTHELIA_PORT:-9091}"
 API_PORT="${AEX_HERMES_API_PORT:-8642}"
 INSTALL_ROOT="${AEX_INSTALL_ROOT:-$HOME/.local/share/aeyeops}"
 WEBUI_DIR="${AEX_WEBUI_DIR:-$INSTALL_ROOT/hermes-webui}"
@@ -734,11 +639,15 @@ MC_REPO="${AEX_MC_REPO:-https://github.com/builderz-labs/mission-control.git}"
 WEBUI_REF="${AEX_WEBUI_REF:-master}"
 MC_REF="${AEX_MC_REF:-main}"
 API_KEY_FILE="${AEX_HERMES_API_KEY_FILE:-}"
-AUTH_MODE="${AEX_PORTAL_AUTH_MODE:-authelia}"
-AUTHELIA_DOMAIN="${AEX_AUTHELIA_DOMAIN:-${AEX_AUTH_DOMAIN:-}}"
 AUTHELIA_PASSWORD_HASH_FILE="${AEX_AUTHELIA_USER_PASSWORD_HASH_FILE:-}"
 AUTHELIA_PASSWORD_HASH="${AEX_AUTHELIA_USER_PASSWORD_HASH:-}"
+AUTHELIA_PASSWORD_FILE="${AEX_AUTHELIA_USER_PASSWORD_FILE:-}"
 INSTALL_AUTHELIA="${AEX_INSTALL_AUTHELIA:-1}"
+CLOUDFLARE_DNS="${AEX_CLOUDFLARE_DNS:-auto}"
+CLOUDFLARE_KEYS_FILE="${AEX_CLOUDFLARE_KEYS_FILE:-$HOME/.config/secrets/keys.env}"
+CLOUDFLARE_ZONE_NAME="${AEX_CLOUDFLARE_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-}}"
+CLOUDFLARE_ZONE_ID="${AEX_CLOUDFLARE_ZONE_ID:-${CLOUDFLARE_ZONE_ID:-}}"
+PORTAL_ORIGIN_IP="${AEX_PORTAL_ORIGIN_IP:-auto}"
 PNPM_VERSION="${AEX_PNPM_VERSION:-10.24.0}"
 PORTAL_NODE_PATH="${AEX_NODE_BIN_DIR:-$HERMES_HOME/node/bin}:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SKIP_CADDY_INSTALL=0
@@ -753,16 +662,21 @@ while [[ $# -gt 0 ]]; do
     --dashboard-domain) DASHBOARD_DOMAIN="${2:-}"; shift 2 ;;
     --webui-domain) WEBUI_DOMAIN="${2:-}"; shift 2 ;;
     --mc-domain) MC_DOMAIN="${2:-}"; shift 2 ;;
+    --auth-domain) AUTHELIA_DOMAIN="${2:-}"; shift 2 ;;
     --user) AUTH_USER="${2:-}"; shift 2 ;;
-    --password-file) PASSWORD_FILE="${2:-}"; shift 2 ;;
-    --password-hash) PASSWORD_HASH="${2:-}"; shift 2 ;;
-    --password-hash-file) PASSWORD_HASH_FILE="${2:-}"; shift 2 ;;
+    --authelia-password-hash-file) AUTHELIA_PASSWORD_HASH_FILE="${2:-}"; shift 2 ;;
+    --authelia-password-hash) AUTHELIA_PASSWORD_HASH="${2:-}"; shift 2 ;;
+    --authelia-password-file) AUTHELIA_PASSWORD_FILE="${2:-}"; shift 2 ;;
+    --ensure-cloudflare-dns) CLOUDFLARE_DNS=1; shift ;;
+    --skip-cloudflare-dns) CLOUDFLARE_DNS=0; shift ;;
+    --portal-origin-ip) PORTAL_ORIGIN_IP="${2:-}"; shift 2 ;;
     --hermes-home) HERMES_HOME="${2:-}"; shift 2 ;;
     --repo-dir) REPO_DIR="${2:-}"; shift 2 ;;
     --dashboard-port) DASHBOARD_PORT="${2:-}"; shift 2 ;;
     --webui-port) WEBUI_PORT="${2:-}"; shift 2 ;;
     --mc-port) MC_PORT="${2:-}"; shift 2 ;;
     --api-port) API_PORT="${2:-}"; shift 2 ;;
+    --authelia-port) AUTHELIA_PORT="${2:-}"; shift 2 ;;
     --install-root) INSTALL_ROOT="${2:-}"; WEBUI_DIR="${AEX_WEBUI_DIR:-${2:-}/hermes-webui}"; MC_DIR="${AEX_MC_DIR:-${2:-}/mission-control}"; shift 2 ;;
     --webui-dir) WEBUI_DIR="${2:-}"; shift 2 ;;
     --mc-dir) MC_DIR="${2:-}"; shift 2 ;;
@@ -771,10 +685,6 @@ while [[ $# -gt 0 ]]; do
     --webui-ref) WEBUI_REF="${2:-}"; shift 2 ;;
     --mc-ref) MC_REF="${2:-}"; shift 2 ;;
     --api-key-file) API_KEY_FILE="${2:-}"; shift 2 ;;
-    --auth-mode) AUTH_MODE="${2:-}"; shift 2 ;;
-    --auth-domain) AUTHELIA_DOMAIN="${2:-}"; shift 2 ;;
-    --authelia-password-hash-file) AUTHELIA_PASSWORD_HASH_FILE="${2:-}"; shift 2 ;;
-    --authelia-password-hash) AUTHELIA_PASSWORD_HASH="${2:-}"; shift 2 ;;
     --install-authelia) INSTALL_AUTHELIA=1; shift ;;
     --skip-authelia-install) INSTALL_AUTHELIA=0; shift ;;
     --restart-gateway) RESTART_GATEWAY=1; shift ;;
@@ -791,67 +701,61 @@ done
 
 REPO_DIR="${REPO_DIR:-$HERMES_HOME/hermes-agent}"
 ENV_DIR="$HERMES_HOME/aeyeops-portal"
-TS="$(date -u +%Y%m%d-%H%M%S)"
 HERMES_BIN="$REPO_DIR/.venv/bin/hermes"
 [[ -x "$HERMES_BIN" ]] || HERMES_BIN="$REPO_DIR/venv/bin/hermes"
 [[ -x "$HERMES_BIN" ]] || HERMES_BIN="hermes"
 
-[[ -n "$DASHBOARD_DOMAIN" && -n "$WEBUI_DOMAIN" && -n "$MC_DOMAIN" ]] || { usage >&2; fail "Missing one or more required domains."; }
-[[ -n "$AUTH_USER" ]] || fail "Missing required --user or AEX_PORTAL_AUTH_USER."
+[[ -n "$DASHBOARD_DOMAIN" && -n "$WEBUI_DOMAIN" && -n "$MC_DOMAIN" && -n "$AUTHELIA_DOMAIN" ]] || { usage >&2; fail "Missing one or more required domains."; }
+[[ -n "$AUTH_USER" ]] || fail "Missing required --user or AEX_AUTHELIA_USER."
 [[ "$AUTH_USER" =~ ^[A-Za-z0-9._~@-]{1,64}$ ]] || fail "--user must contain only A-Z, a-z, 0-9, dot, underscore, tilde, at, or hyphen."
 validate_domain "--dashboard-domain" "$DASHBOARD_DOMAIN"
 validate_domain "--webui-domain" "$WEBUI_DOMAIN"
 validate_domain "--mc-domain" "$MC_DOMAIN"
+validate_domain "--auth-domain" "$AUTHELIA_DOMAIN"
 validate_port "--dashboard-port" "$DASHBOARD_PORT"
 validate_port "--webui-port" "$WEBUI_PORT"
 validate_port "--mc-port" "$MC_PORT"
 validate_port "--api-port" "$API_PORT"
-case "$AUTH_MODE" in
-  authelia|basic) ;;
-  *) fail "--auth-mode must be authelia or basic." ;;
-esac
+validate_port "--authelia-port" "$AUTHELIA_PORT"
 case "$INSTALL_AUTHELIA" in
   0|1) ;;
   true|yes) INSTALL_AUTHELIA=1 ;;
   false|no) INSTALL_AUTHELIA=0 ;;
   *) fail "AEX_INSTALL_AUTHELIA must be 1/0, true/false, or yes/no." ;;
 esac
-[[ "$DASHBOARD_PORT" != "$WEBUI_PORT" && "$DASHBOARD_PORT" != "$MC_PORT" && "$WEBUI_PORT" != "$MC_PORT" ]] || fail "Local app ports must be distinct."
-[[ -x "$DASHBOARD_INSTALLER" ]] || fail "Dashboard installer not found/executable: $DASHBOARD_INSTALLER"
-if [[ "$AUTH_MODE" == "authelia" ]]; then
-  validate_domain "--auth-domain" "$AUTHELIA_DOMAIN"
-fi
+[[ "$DASHBOARD_PORT" != "$WEBUI_PORT" && "$DASHBOARD_PORT" != "$MC_PORT" && "$DASHBOARD_PORT" != "$AUTHELIA_PORT" && "$WEBUI_PORT" != "$MC_PORT" && "$WEBUI_PORT" != "$AUTHELIA_PORT" && "$MC_PORT" != "$AUTHELIA_PORT" ]] || fail "Local app/auth ports must be distinct."
 [[ -d "$REPO_DIR" || "$DRY_RUN" -eq 1 ]] || fail "Hermes repo dir not found: $REPO_DIR"
+if [[ -n "$AUTHELIA_PASSWORD_HASH" ]]; then validate_password_hash "$AUTHELIA_PASSWORD_HASH"; fi
 
 require_root_for_apply
-preflight_authelia_apply_inputs
+preflight_authelia_inputs
+ensure_cloudflare_dns
 
 log "AEyeOps portal stack installation"
-log "dashboard=$DASHBOARD_DOMAIN:$DASHBOARD_PORT webui=$WEBUI_DOMAIN:$WEBUI_PORT mc=$MC_DOMAIN:$MC_PORT api=127.0.0.1:$API_PORT auth_mode=$AUTH_MODE auth_domain=${AUTHELIA_DOMAIN:-none} hermes_home=$HERMES_HOME repo_dir=$REPO_DIR dry_run=$DRY_RUN"
+log "dashboard=$DASHBOARD_DOMAIN:$DASHBOARD_PORT webui=$WEBUI_DOMAIN:$WEBUI_PORT mc=$MC_DOMAIN:$MC_PORT auth=$AUTHELIA_DOMAIN:$AUTHELIA_PORT api=127.0.0.1:$API_PORT hermes_home=$HERMES_HOME repo_dir=$REPO_DIR dry_run=$DRY_RUN"
 
 if [[ "$SKIP_CADDY_INSTALL" -eq 0 ]]; then
   install_caddy_debian
 else
   log "skipping Caddy install by request"
 fi
-resolve_password_hash_for_stack
 configure_hermes_api_server
 
 ensure_git_checkout "Hermes WebUI" "$WEBUI_REPO" "$WEBUI_REF" "$WEBUI_DIR"
 ensure_git_checkout "Mission Control" "$MC_REPO" "$MC_REF" "$MC_DIR"
 build_mission_control
 
-write_dashboard
+write_dashboard_service
 write_webui_service
 write_mc_service
 ensure_caddy_import
 ensure_caddy_log_dir
-write_proxy_snippet "webui" "$WEBUI_DOMAIN" "$WEBUI_PORT" "hermes-webui"
-write_proxy_snippet "mission-control" "$MC_DOMAIN" "$MC_PORT" "mission-control"
 write_logrotate
+run_authelia_install
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   run systemctl daemon-reload
+  run systemctl enable --now hermes-dashboard.service
   run systemctl enable --now hermes-webui.service
   run systemctl enable --now mission-control.service
   if [[ "$RESTART_GATEWAY" -eq 1 ]]; then
@@ -860,28 +764,21 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     log "Hermes API server env was ensured; restart hermes-gateway.service during a maintenance window if API server was not already enabled."
   fi
   run caddy validate --config /etc/caddy/Caddyfile
-  # `caddy validate` is run as root and may eagerly create newly referenced
-  # access-log files. Re-assert ownership before reloading the live caddy
-  # service, which runs as the caddy user.
   ensure_caddy_log_dir
   run systemctl reload caddy
-  run_authelia_cutover_with_rollback
   if [[ "$SKIP_VERIFY" -eq 0 ]]; then
+    run systemctl is-active --quiet hermes-dashboard.service
     run systemctl is-active --quiet hermes-webui.service
     run systemctl is-active --quiet mission-control.service
+    run systemctl is-active --quiet aeyeops-authelia.service
     run curl -fsS "http://127.0.0.1:$WEBUI_PORT/health" >/dev/null
     run curl -fsS "http://127.0.0.1:$MC_PORT/api/status?action=health" >/dev/null
     if [[ -x "$VERIFY_SCRIPT" ]]; then
-      run "$VERIFY_SCRIPT" --domain "$DASHBOARD_DOMAIN" --hermes-home "$HERMES_HOME" --port "$DASHBOARD_PORT" --skip-external
+      run "$VERIFY_SCRIPT" --dashboard-domain "$DASHBOARD_DOMAIN" --webui-domain "$WEBUI_DOMAIN" --mc-domain "$MC_DOMAIN" --auth-domain "$AUTHELIA_DOMAIN" --hermes-home "$HERMES_HOME" --dashboard-port "$DASHBOARD_PORT" --webui-port "$WEBUI_PORT" --mc-port "$MC_PORT" --authelia-port "$AUTHELIA_PORT" --skip-external
     fi
   fi
 else
-  run_authelia_cutover
   log "dry-run: skipped systemctl/caddy changes and local probes"
 fi
 
-if [[ "$AUTH_MODE" == "authelia" ]]; then
-  log "Install complete. After DNS is pointed here, Caddy will request certs for: $DASHBOARD_DOMAIN, $WEBUI_DOMAIN, $MC_DOMAIN, $AUTHELIA_DOMAIN."
-else
-  log "Install complete. After DNS is pointed here, Caddy will request certs for: $DASHBOARD_DOMAIN, $WEBUI_DOMAIN, $MC_DOMAIN."
-fi
+log "Install complete. After DNS is pointed here, Caddy will request certs for: $DASHBOARD_DOMAIN, $WEBUI_DOMAIN, $MC_DOMAIN, $AUTHELIA_DOMAIN."
