@@ -17,6 +17,7 @@ Authelia web login page:
   webui      -> nesquena/hermes-webui on loopback, optionally via Hermes Gateway /v1
   mc         -> builderz-labs Mission Control on loopback
   auth       -> Authelia on loopback
+  callback   -> optional machine callback host with provider-token auth
 
 The script is repeatable and public-fork safe: real domains, password hashes,
 API keys, local install paths, and service choices come from arguments or
@@ -28,6 +29,7 @@ Required unless provided by aeyeops/.env or environment:
   --webui-domain DOMAIN             Public hostname for Hermes WebUI
   --mc-domain DOMAIN                Public hostname for Mission Control
   --auth-domain DOMAIN              Public hostname for Authelia login
+  --callback-domain DOMAIN          Optional machine callback hostname
   --user USER                       Authelia username
   --authelia-password-hash-file PATH
                                     File containing Authelia-compatible password hash
@@ -53,6 +55,11 @@ Options:
   --webui-ref REF                   Hermes WebUI git ref (default: master)
   --mc-ref REF                      Mission Control git ref (default: main)
   --api-key-file PATH               File containing Hermes API_SERVER_KEY for WebUI bridge
+  --google-chat-project-number NUM  Audience for Chat API interaction-event HTTP callbacks
+  --google-chat-addon-service-account-email EMAIL
+                                    Workspace add-on callback token subject
+  --google-chat-http-events-service-account-email EMAIL
+                                    Chat API HTTP event token subject
   --install-authelia                Install Authelia when missing (default)
   --skip-authelia-install           Require an existing Authelia binary
   --restart-gateway                 Restart hermes-gateway after enabling API server
@@ -66,6 +73,7 @@ Options:
 
 Useful host-local env keys loaded from aeyeops/.env when present:
   AEX_DASHBOARD_DOMAIN, AEX_WEBUI_DOMAIN, AEX_MC_DOMAIN, AEX_AUTHELIA_DOMAIN,
+  AEX_CALLBACK_DOMAIN,
   AEX_AUTHELIA_USER, AEX_AUTHELIA_USER_PASSWORD_HASH_FILE,
   AEX_AUTHELIA_USER_PASSWORD_HASH, AEX_AUTHELIA_USER_PASSWORD_FILE,
   AEX_INSTALL_AUTHELIA, AEX_CLOUDFLARE_DNS,
@@ -73,7 +81,11 @@ Useful host-local env keys loaded from aeyeops/.env when present:
   AEX_DASHBOARD_PORT, AEX_WEBUI_PORT, AEX_MC_PORT, AEX_HERMES_API_PORT,
   AEX_AUTHELIA_PORT, AEX_INSTALL_ROOT, AEX_WEBUI_DIR, AEX_MC_DIR,
   AEX_WEBUI_REPO, AEX_MC_REPO, AEX_WEBUI_REF, AEX_MC_REF,
-  AEX_HERMES_API_KEY_FILE, HERMES_HOME, HERMES_REPO_DIR
+  AEX_HERMES_API_KEY_FILE, AEX_GOOGLE_CHAT_PROJECT_NUMBER,
+  AEX_GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL,
+  AEX_GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL,
+  AEX_GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE, AEX_GOOGLE_CLOUD_PROJECT_NUMBER,
+  HERMES_HOME, HERMES_REPO_DIR
 USAGE
 }
 
@@ -142,6 +154,42 @@ redacted_args_for_log() {
     esac
   done
   printf '%s ' "${out[@]}"
+}
+
+discover_google_chat_callback_auth() {
+  [[ -n "$CALLBACK_DOMAIN" ]] || return 0
+  if [[ -n "$GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL" && -n "$GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE" && -n "$GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL" ]]; then
+    return 0
+  fi
+  if ! command -v gcloud >/dev/null 2>&1; then
+    log "Google Chat callback configured; set AEX_GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL and AEX_GOOGLE_CHAT_PROJECT_NUMBER when gcloud is unavailable."
+    return 0
+  fi
+  local auth_json parsed service_account project_number
+  if ! auth_json="$(gcloud workspace-add-ons get-authorization --format=json 2>/dev/null)" || [[ -z "$auth_json" ]]; then
+    log "Google Chat callback configured; could not auto-read Workspace add-on authorization with gcloud."
+    return 0
+  fi
+  parsed="$(python3 -c 'import json, re, sys; d=json.load(sys.stdin); name=str(d.get("name", "")); m=re.match(r"projects/(\d+)/authorization$", name); print(d.get("serviceAccountEmail", "")); print(m.group(1) if m else "")' <<<"$auth_json")" || return 0
+  service_account="$(sed -n '1p' <<<"$parsed")"
+  project_number="$(sed -n '2p' <<<"$parsed")"
+  if [[ -z "$GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL" && -n "$service_account" ]]; then
+    GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL="$service_account"
+    log "discovered Google Workspace add-on service account for callback verification"
+  fi
+  if [[ -z "$GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL" && -n "$service_account" ]]; then
+    GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL="$service_account"
+    log "using Google Workspace add-on service account for HTTP event verification"
+  fi
+  if [[ -z "$GOOGLE_CHAT_PROJECT_NUMBER" && -n "$project_number" ]]; then
+    GOOGLE_CHAT_PROJECT_NUMBER="$project_number"
+    log "discovered Google Cloud project number for optional non-add-on Chat HTTP verification"
+  fi
+}
+
+log_google_chat_callback_console_steps() {
+  [[ -n "$CALLBACK_DOMAIN" ]] || return 0
+  log "Google Chat add-on callback host is configured. In Google Chat API configuration, use HTTP endpoint URL https://$CALLBACK_DOMAIN/google-chat/events and Card Interaction URL/common button-click endpoint https://$CALLBACK_DOMAIN/google-chat/actions."
 }
 
 validate_domain() {
@@ -229,6 +277,16 @@ ensure_caddy_log_dir() {
   install -d -m 0755 /var/log/caddy
   if getent group caddy >/dev/null 2>&1 && id caddy >/dev/null 2>&1; then
     chown caddy:caddy /var/log/caddy
+    for log_file in \
+      /var/log/caddy/aeyeops-callbacks-access.log \
+      /var/log/caddy/hermes-dashboard-access.log \
+      /var/log/caddy/hermes-webui-access.log \
+      /var/log/caddy/mission-control-access.log
+    do
+      touch "$log_file"
+      chown caddy:caddy "$log_file"
+      chmod 0644 "$log_file"
+    done
     find /var/log/caddy -maxdepth 1 -type f -name '*access.log*' -exec chown caddy:caddy {} + -exec chmod 0644 {} +
   fi
 }
@@ -236,7 +294,7 @@ ensure_caddy_log_dir() {
 upsert_env_value() {
   local file="$1" key="$2" value="$3" mode="${4:-0600}"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    if [[ "$key" == *KEY* || "$key" == *PASSWORD* || "$key" == *SECRET* ]]; then
+    if [[ "$key" == *KEY* || "$key" == *PASSWORD* || "$key" == *SECRET* || "$key" == *EMAIL* || "$key" == *ACCOUNT* ]]; then
       log "would set $key=<redacted> in $file"
     else
       log "would set $key=$value in $file"
@@ -393,6 +451,9 @@ ensure_cloudflare_dns() {
     "$MC_DOMAIN"
     "$AUTHELIA_DOMAIN"
   )
+  if [[ -n "$CALLBACK_DOMAIN" ]]; then
+    dns_args+=("$CALLBACK_DOMAIN")
+  fi
   if [[ -n "$CLOUDFLARE_ZONE_NAME" ]]; then
     dns_args=(--zone-name "$CLOUDFLARE_ZONE_NAME" "${dns_args[@]}")
   fi
@@ -400,10 +461,10 @@ ensure_cloudflare_dns() {
     dns_args=(--zone-id "$CLOUDFLARE_ZONE_ID" "${dns_args[@]}")
   fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "dry-run: would upsert Cloudflare A records for dashboard/webui/mc/auth when credentials are available"
+    log "dry-run: would upsert Cloudflare A records for dashboard/webui/mc/auth${CALLBACK_DOMAIN:+/callback} when credentials are available"
     return 0
   fi
-  log "+ $CLOUDFLARE_DNS_HELPER --keys-file <host-local> --origin-ip <redacted> $DASHBOARD_DOMAIN $WEBUI_DOMAIN $MC_DOMAIN $AUTHELIA_DOMAIN"
+  log "+ $CLOUDFLARE_DNS_HELPER --keys-file <host-local> --origin-ip <redacted> $DASHBOARD_DOMAIN $WEBUI_DOMAIN $MC_DOMAIN $AUTHELIA_DOMAIN${CALLBACK_DOMAIN:+ $CALLBACK_DOMAIN}"
   "$CLOUDFLARE_DNS_HELPER" "${dns_args[@]}"
 }
 
@@ -448,6 +509,59 @@ configure_hermes_api_server() {
   upsert_env_value "$env_file" API_SERVER_PORT "$API_PORT" 0600
   upsert_env_value "$env_file" API_SERVER_KEY "$API_KEY" 0600
   upsert_env_value "$env_file" API_SERVER_MODEL_NAME hermes-agent 0600
+  if [[ -n "$CALLBACK_DOMAIN" ]]; then
+    local action_url="https://$CALLBACK_DOMAIN/google-chat/actions"
+    local event_url="https://$CALLBACK_DOMAIN/google-chat/events"
+    upsert_env_value "$env_file" GOOGLE_CHAT_ADDON_CALLBACK_URL "$action_url" 0600
+    upsert_env_value "$env_file" GOOGLE_CHAT_ADDON_AUDIENCE "$action_url" 0600
+    upsert_env_value "$env_file" GOOGLE_CHAT_HTTP_EVENTS_URL "$event_url" 0600
+    upsert_env_value "$env_file" GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE "${GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE:-$event_url}" 0600
+    upsert_env_value "$env_file" GOOGLE_CHAT_CARD_ACTION_TRANSPORT addon_http 0600
+    if [[ -n "$GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL" ]]; then
+      upsert_env_value "$env_file" GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL "$GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL" 0600
+    fi
+    if [[ -n "$GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL" ]]; then
+      upsert_env_value "$env_file" GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL "$GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL" 0600
+    fi
+  fi
+}
+
+write_callback_caddy_snippet() {
+  [[ -n "$CALLBACK_DOMAIN" ]] || return 0
+  write_file /etc/caddy/conf.d/aeyeops-callbacks.caddy 0644 <<CADDY
+$CALLBACK_DOMAIN {
+    encode zstd gzip
+
+    log {
+        output file /var/log/caddy/aeyeops-callbacks-access.log {
+            roll_size 10MiB
+            roll_keep 7
+            roll_keep_for 168h
+        }
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        X-Frame-Options "DENY"
+    }
+
+    @google_chat_callbacks {
+        method POST
+        path /google-chat/actions /google-chat/events
+    }
+    handle @google_chat_callbacks {
+        reverse_proxy 127.0.0.1:$API_PORT {
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle {
+        respond "not found" 404
+    }
+}
+CADDY
 }
 
 write_dashboard_service() {
@@ -577,7 +691,7 @@ $HERMES_HOME/logs/aeyeops-portal-*.log /var/log/caddy/aeyeops-*-access.log /var/
     compress
     delaycompress
     dateext
-    create 0640 root root
+    create 0644 caddy caddy
 }
 LOGROTATE
 }
@@ -623,6 +737,7 @@ DASHBOARD_DOMAIN="${AEX_DASHBOARD_DOMAIN:-}"
 WEBUI_DOMAIN="${AEX_WEBUI_DOMAIN:-}"
 MC_DOMAIN="${AEX_MC_DOMAIN:-}"
 AUTHELIA_DOMAIN="${AEX_AUTHELIA_DOMAIN:-}"
+CALLBACK_DOMAIN="${AEX_CALLBACK_DOMAIN:-}"
 AUTH_USER="${AEX_AUTHELIA_USER:-}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 REPO_DIR="${HERMES_REPO_DIR:-}"
@@ -639,6 +754,10 @@ MC_REPO="${AEX_MC_REPO:-https://github.com/builderz-labs/mission-control.git}"
 WEBUI_REF="${AEX_WEBUI_REF:-master}"
 MC_REF="${AEX_MC_REF:-main}"
 API_KEY_FILE="${AEX_HERMES_API_KEY_FILE:-}"
+GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL="${AEX_GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL:-${GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL:-}}"
+GOOGLE_CHAT_PROJECT_NUMBER="${AEX_GOOGLE_CHAT_PROJECT_NUMBER:-${AEX_GOOGLE_CLOUD_PROJECT_NUMBER:-${GOOGLE_CHAT_PROJECT_NUMBER:-${GOOGLE_CLOUD_PROJECT_NUMBER:-}}}}"
+GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL="${AEX_GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL:-${GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL:-}}"
+GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE="${AEX_GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE:-${GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE:-}}"
 AUTHELIA_PASSWORD_HASH_FILE="${AEX_AUTHELIA_USER_PASSWORD_HASH_FILE:-}"
 AUTHELIA_PASSWORD_HASH="${AEX_AUTHELIA_USER_PASSWORD_HASH:-}"
 AUTHELIA_PASSWORD_FILE="${AEX_AUTHELIA_USER_PASSWORD_FILE:-}"
@@ -663,6 +782,7 @@ while [[ $# -gt 0 ]]; do
     --webui-domain) WEBUI_DOMAIN="${2:-}"; shift 2 ;;
     --mc-domain) MC_DOMAIN="${2:-}"; shift 2 ;;
     --auth-domain) AUTHELIA_DOMAIN="${2:-}"; shift 2 ;;
+    --callback-domain) CALLBACK_DOMAIN="${2:-}"; shift 2 ;;
     --user) AUTH_USER="${2:-}"; shift 2 ;;
     --authelia-password-hash-file) AUTHELIA_PASSWORD_HASH_FILE="${2:-}"; shift 2 ;;
     --authelia-password-hash) AUTHELIA_PASSWORD_HASH="${2:-}"; shift 2 ;;
@@ -685,6 +805,9 @@ while [[ $# -gt 0 ]]; do
     --webui-ref) WEBUI_REF="${2:-}"; shift 2 ;;
     --mc-ref) MC_REF="${2:-}"; shift 2 ;;
     --api-key-file) API_KEY_FILE="${2:-}"; shift 2 ;;
+    --google-chat-project-number) GOOGLE_CHAT_PROJECT_NUMBER="${2:-}"; GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE="${2:-}"; shift 2 ;;
+    --google-chat-addon-service-account-email) GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL="${2:-}"; shift 2 ;;
+    --google-chat-http-events-service-account-email) GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL="${2:-}"; shift 2 ;;
     --install-authelia) INSTALL_AUTHELIA=1; shift ;;
     --skip-authelia-install) INSTALL_AUTHELIA=0; shift ;;
     --restart-gateway) RESTART_GATEWAY=1; shift ;;
@@ -712,6 +835,9 @@ validate_domain "--dashboard-domain" "$DASHBOARD_DOMAIN"
 validate_domain "--webui-domain" "$WEBUI_DOMAIN"
 validate_domain "--mc-domain" "$MC_DOMAIN"
 validate_domain "--auth-domain" "$AUTHELIA_DOMAIN"
+if [[ -n "$CALLBACK_DOMAIN" ]]; then
+  validate_domain "--callback-domain" "$CALLBACK_DOMAIN"
+fi
 validate_port "--dashboard-port" "$DASHBOARD_PORT"
 validate_port "--webui-port" "$WEBUI_PORT"
 validate_port "--mc-port" "$MC_PORT"
@@ -729,10 +855,11 @@ if [[ -n "$AUTHELIA_PASSWORD_HASH" ]]; then validate_password_hash "$AUTHELIA_PA
 
 require_root_for_apply
 preflight_authelia_inputs
+discover_google_chat_callback_auth
 ensure_cloudflare_dns
 
 log "AEyeOps portal stack installation"
-log "dashboard=$DASHBOARD_DOMAIN:$DASHBOARD_PORT webui=$WEBUI_DOMAIN:$WEBUI_PORT mc=$MC_DOMAIN:$MC_PORT auth=$AUTHELIA_DOMAIN:$AUTHELIA_PORT api=127.0.0.1:$API_PORT hermes_home=$HERMES_HOME repo_dir=$REPO_DIR dry_run=$DRY_RUN"
+log "dashboard=$DASHBOARD_DOMAIN:$DASHBOARD_PORT webui=$WEBUI_DOMAIN:$WEBUI_PORT mc=$MC_DOMAIN:$MC_PORT auth=$AUTHELIA_DOMAIN:$AUTHELIA_PORT${CALLBACK_DOMAIN:+ callback=$CALLBACK_DOMAIN} api=127.0.0.1:$API_PORT hermes_home=$HERMES_HOME repo_dir=$REPO_DIR dry_run=$DRY_RUN"
 
 if [[ "$SKIP_CADDY_INSTALL" -eq 0 ]]; then
   install_caddy_debian
@@ -740,6 +867,7 @@ else
   log "skipping Caddy install by request"
 fi
 configure_hermes_api_server
+log_google_chat_callback_console_steps
 
 ensure_git_checkout "Hermes WebUI" "$WEBUI_REPO" "$WEBUI_REF" "$WEBUI_DIR"
 ensure_git_checkout "Mission Control" "$MC_REPO" "$MC_REF" "$MC_DIR"
@@ -750,6 +878,7 @@ write_webui_service
 write_mc_service
 ensure_caddy_import
 ensure_caddy_log_dir
+write_callback_caddy_snippet
 write_logrotate
 run_authelia_install
 
@@ -776,9 +905,16 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     if [[ -x "$VERIFY_SCRIPT" ]]; then
       run "$VERIFY_SCRIPT" --dashboard-domain "$DASHBOARD_DOMAIN" --webui-domain "$WEBUI_DOMAIN" --mc-domain "$MC_DOMAIN" --auth-domain "$AUTHELIA_DOMAIN" --hermes-home "$HERMES_HOME" --dashboard-port "$DASHBOARD_PORT" --webui-port "$WEBUI_PORT" --mc-port "$MC_PORT" --authelia-port "$AUTHELIA_PORT" --skip-external
     fi
+    if [[ -n "$CALLBACK_DOMAIN" ]]; then
+      callback_status=""
+      for callback_path in /google-chat/actions /google-chat/events; do
+        callback_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "https://$CALLBACK_DOMAIN$callback_path" -H 'Content-Type: application/json' --data '{}' || true)"
+        [[ "$callback_status" == "401" ]] || fail "Callback endpoint $callback_path without Google token returned $callback_status; expected 401."
+      done
+    fi
   fi
 else
   log "dry-run: skipped systemctl/caddy changes and local probes"
 fi
 
-log "Install complete. After DNS is pointed here, Caddy will request certs for: $DASHBOARD_DOMAIN, $WEBUI_DOMAIN, $MC_DOMAIN, $AUTHELIA_DOMAIN."
+log "Install complete. After DNS is pointed here, Caddy will request certs for: $DASHBOARD_DOMAIN, $WEBUI_DOMAIN, $MC_DOMAIN, $AUTHELIA_DOMAIN${CALLBACK_DOMAIN:+, $CALLBACK_DOMAIN}."

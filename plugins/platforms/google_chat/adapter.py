@@ -71,6 +71,7 @@ HttpError: Any = Exception  # type: ignore
 MediaFileUpload: Any = None  # type: ignore
 
 _google_modules_loaded: bool = False
+_CHAT_HTTP_SERVICE_ACCOUNT_EMAIL = "chat@system.gserviceaccount.com"
 
 
 def _load_google_modules() -> bool:
@@ -376,10 +377,17 @@ def _mime_for_message_type(mime: str) -> MessageType:
 
 def _card_click_action_name(payload: Dict[str, Any]) -> str:
     action = payload.get("action") or {}
+    common = payload.get("common") or {}
+    params = _card_click_parameters(payload)
     return str(
         action.get("actionMethodName")
-        or action.get("function")
+        or common.get("invokedFunction")
+        or params.get("__action_method_name__")
+        or params.get("action")
+        or params.get("method")
+        or params.get("action_method_name")
         or action.get("methodName")
+        or action.get("function")
         or ""
     ).strip()
 
@@ -391,6 +399,14 @@ def _card_click_parameters(payload: Dict[str, Any]) -> Dict[str, str]:
         raw_params = [{"key": key, "value": value} for key, value in raw_params.items()]
 
     params: Dict[str, str] = {}
+    common = payload.get("common") or {}
+    common_params = common.get("parameters") or {}
+    if isinstance(common_params, dict):
+        for key, value in common_params.items():
+            key = str(key).strip()
+            if key:
+                params[key] = str(value)
+
     for item in raw_params:
         if not isinstance(item, dict):
             continue
@@ -469,6 +485,54 @@ def _extract_card_clicked_payload(
     return None
 
 
+def _addon_event_to_card_click_payload(event: Dict[str, Any]) -> Dict[str, Any]:
+    common = event.get("commonEventObject") or event.get("common") or {}
+    chat = event.get("chat") or {}
+    payload = chat.get("buttonClickedPayload") or event.get("buttonClickedPayload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    normalized: Dict[str, Any] = dict(payload)
+    normalized["type"] = "CARD_CLICKED"
+
+    common_params = common.get("parameters") if isinstance(common, dict) else {}
+    if isinstance(common_params, dict):
+        existing_common = normalized.get("common") if isinstance(normalized.get("common"), dict) else {}
+        merged_common = dict(existing_common)
+        merged_params = dict(merged_common.get("parameters") or {})
+        merged_params.update(common_params)
+        merged_common["parameters"] = merged_params
+        if common.get("invokedFunction"):
+            merged_common["invokedFunction"] = common.get("invokedFunction")
+        normalized["common"] = merged_common
+
+    for key in ("space", "message", "user"):
+        if normalized.get(key):
+            continue
+        value = chat.get(key) or event.get(key)
+        if isinstance(value, dict):
+            normalized[key] = value
+
+    message_payload = chat.get("messagePayload")
+    if not normalized.get("message") and isinstance(message_payload, dict):
+        message = message_payload.get("message")
+        if isinstance(message, dict):
+            normalized["message"] = message
+
+    return normalized
+
+
+def _verify_google_id_token(token: str, audience: str) -> Dict[str, Any]:
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
+
+    return id_token.verify_oauth2_token(
+        token,
+        google_requests.Request(),
+        audience,
+    )
+
+
 def _required_str(mapping: Dict[str, Any], key: str, context: str) -> str:
     value = mapping.get(key)
     if value is None:
@@ -479,12 +543,18 @@ def _required_str(mapping: Dict[str, Any], key: str, context: str) -> str:
     return value
 
 
-def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
+def _button_to_chat(
+    button: Dict[str, Any],
+    action_rewriter: Optional[Callable[[str, Dict[str, str]], Tuple[str, Dict[str, str]]]] = None,
+) -> Dict[str, Any]:
     text = _required_str(button, "text", "button")
     action = _required_str(button, "action", "button")
     raw_params = button.get("parameters") or {}
     if not isinstance(raw_params, dict):
         raise ValueError("button.parameters must be an object")
+    raw_params = {str(key): str(value) for key, value in raw_params.items()}
+    if action_rewriter is not None:
+        action, raw_params = action_rewriter(action, raw_params)
     parameters = [
         {"key": str(key), "value": str(value)}
         for key, value in sorted(raw_params.items())
@@ -495,7 +565,10 @@ def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
+def _widget_to_chat(
+    widget: Dict[str, Any],
+    action_rewriter: Optional[Callable[[str, Dict[str, str]], Tuple[str, Dict[str, str]]]] = None,
+) -> Dict[str, Any]:
     if not isinstance(widget, dict):
         raise ValueError("card widgets must be objects")
     widget_type = str(widget.get("type") or "").strip()
@@ -535,7 +608,7 @@ def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("button widgets require at least one button")
         return {
             "buttonList": {
-                "buttons": [_button_to_chat(btn) for btn in raw_buttons]
+                "buttons": [_button_to_chat(btn, action_rewriter) for btn in raw_buttons]
             }
         }
     if widget_type in {"selection", "selection_input"}:
@@ -565,7 +638,10 @@ def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
     raise ValueError(f"unsupported widget type: {widget_type}")
 
 
-def card_spec_to_cards_v2(card_spec: Dict[str, Any]) -> Dict[str, Any]:
+def card_spec_to_cards_v2(
+    card_spec: Dict[str, Any],
+    action_rewriter: Optional[Callable[[str, Dict[str, str]], Tuple[str, Dict[str, str]]]] = None,
+) -> Dict[str, Any]:
     if not isinstance(card_spec, dict):
         raise ValueError("card must be an object")
 
@@ -580,7 +656,9 @@ def card_spec_to_cards_v2(card_spec: Dict[str, Any]) -> Dict[str, Any]:
         widgets = section.get("widgets") or []
         if not isinstance(widgets, list) or not widgets:
             raise ValueError("card section widgets must contain at least one widget")
-        rendered: Dict[str, Any] = {"widgets": [_widget_to_chat(w) for w in widgets]}
+        rendered: Dict[str, Any] = {
+            "widgets": [_widget_to_chat(w, action_rewriter) for w in widgets]
+        }
         if section.get("header"):
             rendered["header"] = str(section["header"])
         sections.append(rendered)
@@ -794,6 +872,52 @@ class GoogleChatAdapter(BasePlatformAdapter):
         self._clarify_state: Dict[str, str] = {}
         self._shutting_down = False
         self._rate_limit_hits: Dict[str, int] = {}
+        self._addon_callback_url = str(
+            self.config.extra.get("addon_callback_url")
+            or os.getenv("GOOGLE_CHAT_ADDON_CALLBACK_URL")
+            or ""
+        ).strip()
+        self._addon_audience = str(
+            self.config.extra.get("addon_audience")
+            or os.getenv("GOOGLE_CHAT_ADDON_AUDIENCE")
+            or self._addon_callback_url
+            or ""
+        ).strip()
+        self._addon_service_account_email = str(
+            self.config.extra.get("addon_service_account_email")
+            or os.getenv("GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL")
+            or ""
+        ).strip()
+        self._http_events_url = str(
+            self.config.extra.get("http_events_url")
+            or os.getenv("GOOGLE_CHAT_HTTP_EVENTS_URL")
+            or ""
+        ).strip()
+        self._http_events_audience = str(
+            self.config.extra.get("http_events_audience")
+            or os.getenv("GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE")
+            or self._http_events_url
+            or self.config.extra.get("project_number")
+            or os.getenv("GOOGLE_CHAT_PROJECT_NUMBER")
+            or os.getenv("GOOGLE_CLOUD_PROJECT_NUMBER")
+            or ""
+        ).strip()
+        default_http_events_service_account = (
+            self._addon_service_account_email
+            if self._http_events_audience.startswith("https://")
+            else _CHAT_HTTP_SERVICE_ACCOUNT_EMAIL
+        )
+        self._http_events_service_account_email = str(
+            self.config.extra.get("http_events_service_account_email")
+            or os.getenv("GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL")
+            or (default_http_events_service_account if self._http_events_audience else "")
+        ).strip()
+        self._card_action_transport = str(
+            self.config.extra.get("card_action_transport")
+            or os.getenv("GOOGLE_CHAT_CARD_ACTION_TRANSPORT")
+            or os.getenv("GOOGLE_CHAT_CARD_ACTION_MODE")
+            or "chat_event"
+        ).strip().lower()
         # Last-seen inbound thread name per chat_id (space). Google Chat
         # DMs create a NEW thread per top-level user message but the user
         # views them as one logical conversation. We:
@@ -838,6 +962,116 @@ class GoogleChatAdapter(BasePlatformAdapter):
             self._max_bytes = int(os.getenv("GOOGLE_CHAT_MAX_BYTES", str(16 * 1024 * 1024)))
         except (ValueError, TypeError):
             self._max_bytes = 16 * 1024 * 1024
+
+    def _addon_action_function(self, action_name: str) -> str:
+        if self._card_action_transport in {"addon_http", "http"}:
+            return self._addon_callback_url or action_name
+        return action_name
+
+    def _addon_action_parameters(self, action_name: str, params: Dict[str, str]) -> Dict[str, str]:
+        if self._card_action_transport not in {"addon_http", "http"} or not self._addon_callback_url:
+            return params
+        merged = {"__action_method_name__": action_name, "action": action_name}
+        merged.update(params)
+        return merged
+
+    def _rewrite_card_button_action(
+        self, action_name: str, params: Dict[str, str]
+    ) -> Tuple[str, Dict[str, str]]:
+        return (
+            self._addon_action_function(action_name),
+            self._addon_action_parameters(action_name, params),
+        )
+
+    def verify_addon_request(self, auth_header: str) -> Optional[str]:
+        if not self._addon_audience or not self._addon_service_account_email:
+            return "google_chat_addon_not_configured"
+        return self._verify_google_bearer(
+            auth_header,
+            audience=self._addon_audience,
+            service_account_email=self._addon_service_account_email,
+            label="add-on callback",
+        )
+
+    def verify_http_event_request(self, auth_header: str) -> Optional[str]:
+        if not self._http_events_audience or not self._http_events_service_account_email:
+            return "google_chat_http_events_not_configured"
+        return self._verify_google_bearer(
+            auth_header,
+            audience=self._http_events_audience,
+            service_account_email=self._http_events_service_account_email,
+            label="HTTP event callback",
+        )
+
+    def _verify_google_bearer(
+        self,
+        auth_header: str,
+        *,
+        audience: str,
+        service_account_email: str,
+        label: str,
+    ) -> Optional[str]:
+        if not auth_header.startswith("Bearer "):
+            return "missing_google_bearer_token"
+        token = auth_header[7:].strip()
+        if not token:
+            return "missing_google_bearer_token"
+        try:
+            claims = _verify_google_id_token(token, audience)
+        except Exception as exc:
+            logger.warning("[GoogleChat] %s token verification failed: %s", label, exc)
+            return "invalid_google_bearer_token"
+
+        email = str(claims.get("email") or claims.get("sub") or "").strip()
+        if claims.get("email_verified") is not True:
+            return "google_bearer_email_not_verified"
+        if email != service_account_email:
+            return "google_bearer_email_not_allowed"
+        return None
+
+    async def dispatch_addon_action(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        payload = _addon_event_to_card_click_payload(event)
+        action_name = _card_click_action_name(payload)
+        logger.info(
+            "[GoogleChat] add-on action received; action=%s params=%d",
+            action_name or "<unknown>",
+            len(_card_click_parameters(payload)),
+        )
+        await self._dispatch_card_click(payload)
+        return {}
+
+    async def dispatch_http_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        payload = _addon_event_to_card_click_payload(event)
+        if _card_click_action_name(payload) or _card_click_parameters(payload):
+            logger.info(
+                "[GoogleChat] HTTP card action received; action=%s params=%d",
+                _card_click_action_name(payload) or "<unknown>",
+                len(_card_click_parameters(payload)),
+            )
+            await self._dispatch_card_click(payload)
+            return {}
+
+        card_payload = _extract_card_clicked_payload(event)
+        if card_payload is not None:
+            logger.info("[GoogleChat] HTTP CARD_CLICKED event received")
+            await self._dispatch_card_click(card_payload)
+            return {}
+
+        extracted = self._extract_message_payload(event)
+        if extracted is not None:
+            msg, space, fmt = extracted
+            if "space" not in msg and space:
+                msg = dict(msg)
+                msg["space"] = space
+            enriched = dict(event)
+            if "space" not in enriched and space:
+                enriched["space"] = space
+            logger.info("[GoogleChat] HTTP MESSAGE event received; format=%s", fmt)
+            await self._dispatch_message(msg, enriched)
+            return {}
+
+        logger.info("[GoogleChat] HTTP event ignored; keys=%s", list(event.keys()))
+        return {}
 
     # ------------------------------------------------------------------
     # Configuration loading and validation
@@ -1531,6 +1765,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # --- Card-click events ---
             card_payload = _extract_card_clicked_payload(envelope, ce_type)
             if card_payload is not None:
+                logger.info(
+                    "[GoogleChat] CARD_CLICKED received via Pub/Sub; ce-type=%s",
+                    ce_type or "<none>",
+                )
                 self._submit_on_loop(self._dispatch_card_click(card_payload))
                 message.ack()
                 return
@@ -1538,7 +1776,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             # --- Message events ---
             extracted = self._extract_message_payload(envelope, ce_type)
             if extracted is None:
-                logger.debug(
+                logger.info(
                     "[GoogleChat] Envelope did not match a known message format; "
                     "ce-type=%s, keys=%s", ce_type, list(envelope.keys())
                 )
@@ -1679,6 +1917,11 @@ class GoogleChatAdapter(BasePlatformAdapter):
         )
         params = _card_click_parameters(payload)
         if _card_click_action_name(payload) == "hermes_clarify":
+            logger.info(
+                "[GoogleChat] CARD_CLICKED clarify action received; clarify_id_present=%s choice_present=%s",
+                bool(params.get("clarify_id")),
+                bool(params.get("choice")),
+            )
             await self._dispatch_clarify_card_click(
                 source=source,
                 clarify_id=params.get("clarify_id", ""),
@@ -2376,7 +2619,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 chat_id, question, choices, clarify_id, session_key, metadata
             )
 
-        buttons = []
+        buttons: List[Dict[str, Any]] = []
         for choice in choices:
             choice_text = str(choice).strip()
             if not choice_text:
@@ -2385,21 +2628,27 @@ class GoogleChatAdapter(BasePlatformAdapter):
             buttons.append(
                 {
                     "text": label,
-                    "action": "hermes_clarify",
-                    "parameters": {
-                        "clarify_id": clarify_id,
-                        "choice": choice_text,
-                    },
+                    "action": self._addon_action_function("hermes_clarify"),
+                    "parameters": self._addon_action_parameters(
+                        "hermes_clarify",
+                        {
+                            "clarify_id": clarify_id,
+                            "choice": choice_text,
+                        },
+                    ),
                 }
             )
         buttons.append(
             {
                 "text": "Other / type answer",
-                "action": "hermes_clarify",
-                "parameters": {
-                    "clarify_id": clarify_id,
-                    "choice": "__other__",
-                },
+                "action": self._addon_action_function("hermes_clarify"),
+                "parameters": self._addon_action_parameters(
+                    "hermes_clarify",
+                    {
+                        "clarify_id": clarify_id,
+                        "choice": "__other__",
+                    },
+                ),
             }
         )
         if not buttons:
@@ -2415,15 +2664,43 @@ class GoogleChatAdapter(BasePlatformAdapter):
                     {
                         "widgets": [
                             {"type": "text", "text": f"❓ {question}"},
-                            {"type": "buttons", "buttons": buttons},
                         ]
                     }
                 ],
             }
         )
-        result = await self.send_card(chat_id, card, metadata=metadata)
+        body: Dict[str, Any] = {
+            "cardsV2": [card],
+            "accessoryWidgets": [
+                {"buttonList": {"buttons": [_button_to_chat(btn) for btn in buttons]}}
+            ],
+        }
+        thread_id = self._resolve_thread_id(None, metadata, chat_id=chat_id)
+        if thread_id:
+            body["thread"] = {"name": thread_id}
+        try:
+            result = await self._create_message(chat_id, body)
+        except HttpError as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            result = SendResult(
+                success=False,
+                error=_redact_sensitive(str(exc)),
+                retryable=status in _RETRYABLE_HTTP_STATUSES,
+            )
+        except Exception as exc:
+            logger.debug("[GoogleChat] send_clarify card failed", exc_info=True)
+            result = SendResult(
+                success=False,
+                error=_redact_sensitive(str(exc)),
+                retryable=_is_retryable_error(exc),
+            )
         if result.success:
             self._clarify_state[clarify_id] = session_key
+            try:
+                from tools.clarify_gateway import mark_awaiting_text
+                mark_awaiting_text(clarify_id)
+            except Exception as exc:
+                logger.warning("[GoogleChat] mark_awaiting_text failed: %s", exc)
             return result
         return await super().send_clarify(
             chat_id, question, choices, clarify_id, session_key, metadata
@@ -3543,6 +3820,31 @@ def _check_for_registry() -> bool:
     return bool(project and subscription)
 
 
+def _apply_yaml_config(_yaml_cfg: dict, google_chat_cfg: dict) -> dict | None:
+    seeded: Dict[str, Any] = {}
+    key_map = {
+        "addon_callback_url": "GOOGLE_CHAT_ADDON_CALLBACK_URL",
+        "addon_audience": "GOOGLE_CHAT_ADDON_AUDIENCE",
+        "addon_service_account_email": "GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL",
+        "http_events_url": "GOOGLE_CHAT_HTTP_EVENTS_URL",
+        "http_events_audience": "GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE",
+        "http_events_service_account_email": "GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL",
+        "project_number": "GOOGLE_CHAT_PROJECT_NUMBER",
+        "card_action_transport": "GOOGLE_CHAT_CARD_ACTION_TRANSPORT",
+    }
+    for key, env_name in key_map.items():
+        value = google_chat_cfg.get(key)
+        if value is None:
+            continue
+        value_str = str(value).strip()
+        if not value_str:
+            continue
+        seeded[key] = value_str
+        if not os.getenv(env_name):
+            os.environ[env_name] = value_str
+    return seeded or None
+
+
 def _is_connected(config: PlatformConfig) -> bool:
     """``GatewayConfig.get_connected_platforms()`` polls this."""
     return bool(getattr(config, "enabled", False)) and _validate_config(config)
@@ -3592,6 +3894,19 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
             "chat_id": home,
             "name": os.getenv("GOOGLE_CHAT_HOME_CHANNEL_NAME", "Home"),
         }
+    for key, env_name in {
+        "addon_callback_url": "GOOGLE_CHAT_ADDON_CALLBACK_URL",
+        "addon_audience": "GOOGLE_CHAT_ADDON_AUDIENCE",
+        "addon_service_account_email": "GOOGLE_CHAT_ADDON_SERVICE_ACCOUNT_EMAIL",
+        "http_events_url": "GOOGLE_CHAT_HTTP_EVENTS_URL",
+        "http_events_audience": "GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE",
+        "http_events_service_account_email": "GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL",
+        "project_number": "GOOGLE_CHAT_PROJECT_NUMBER",
+        "card_action_transport": "GOOGLE_CHAT_CARD_ACTION_TRANSPORT",
+    }.items():
+        value = os.getenv(env_name)
+        if value:
+            seed[key] = value
     return seed
 
 
@@ -3923,11 +4238,6 @@ async def _send_google_chat_card_tool(args: Dict[str, Any], **_kw: Any) -> str:
         return tool_error("thread_id must belong to chat_id")
 
     try:
-        card = card_spec_to_cards_v2(args.get("card") or {})
-    except Exception as exc:
-        return tool_error(f"invalid card spec: {exc}")
-
-    try:
         from gateway.config import Platform
         from gateway.run import _gateway_runner_ref
 
@@ -3938,6 +4248,14 @@ async def _send_google_chat_card_tool(args: Dict[str, Any], **_kw: Any) -> str:
             return tool_error(
                 "Google Chat card send requires a live google_chat gateway adapter"
             )
+
+        try:
+            card = card_spec_to_cards_v2(
+                args.get("card") or {},
+                action_rewriter=getattr(adapter, "_rewrite_card_button_action", None),
+            )
+        except Exception as exc:
+            return tool_error(f"invalid card spec: {exc}")
 
         metadata = {"thread_id": thread_id} if thread_id else None
         result = await adapter.send_card(chat_id, card, metadata=metadata)
@@ -4004,6 +4322,7 @@ def register(ctx) -> None:
         # hook, deliver=google_chat cron jobs fail with "No live adapter"
         # when cron runs separately from the gateway.
         standalone_sender_fn=_standalone_send,
+        apply_yaml_config_fn=_apply_yaml_config,
         # Auth env vars for _is_user_authorized() integration.
         allowed_users_env="GOOGLE_CHAT_ALLOWED_USERS",
         allow_all_env="GOOGLE_CHAT_ALLOW_ALL_USERS",

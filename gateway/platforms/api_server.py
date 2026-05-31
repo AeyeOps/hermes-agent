@@ -766,6 +766,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self.gateway_runner: Optional[Any] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -913,6 +914,99 @@ class APIServerAdapter(BasePlatformAdapter):
             {"error": {"message": "Invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}},
             status=401,
         )
+
+    def _get_google_chat_adapter(self, request: Optional["web.Request"] = None) -> Any:
+        if request is not None:
+            direct = request.app.get("google_chat_adapter")
+            if direct is not None:
+                return direct
+            runner = request.app.get("gateway_runner")
+        else:
+            runner = None
+        runner = runner or self.gateway_runner
+        adapters = getattr(runner, "adapters", {}) or {}
+        for platform, adapter in adapters.items():
+            if getattr(platform, "value", str(platform)) == "google_chat":
+                return adapter
+        return None
+
+    async def _handle_google_chat_action(self, request: "web.Request") -> "web.Response":
+        adapter = self._get_google_chat_adapter(request)
+        if adapter is None or not hasattr(adapter, "dispatch_addon_action"):
+            return web.json_response(
+                _openai_error("Google Chat adapter is not connected", code="google_chat_unavailable"),
+                status=503,
+            )
+
+        verify_fn = getattr(adapter, "verify_addon_request", None)
+        if not callable(verify_fn):
+            return web.json_response(
+                _openai_error("Google Chat add-on callback verification is unavailable", code="google_chat_addon_unavailable"),
+                status=503,
+            )
+        verify_error = verify_fn(request.headers.get("Authorization", ""))
+        if verify_error:
+            return web.json_response(
+                _openai_error("Invalid Google Chat add-on callback token", code=str(verify_error)),
+                status=401,
+            )
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response(
+                _openai_error("Request body must be valid JSON", code="invalid_json"),
+                status=400,
+            )
+        if not isinstance(body, dict):
+            return web.json_response(
+                _openai_error("Request body must be a JSON object", code="invalid_request"),
+                status=400,
+            )
+
+        result = await adapter.dispatch_addon_action(body)
+        if not isinstance(result, dict):
+            result = {}
+        return web.json_response(result)
+
+    async def _handle_google_chat_event(self, request: "web.Request") -> "web.Response":
+        adapter = self._get_google_chat_adapter(request)
+        if adapter is None or not hasattr(adapter, "dispatch_http_event"):
+            return web.json_response(
+                _openai_error("Google Chat adapter is not connected", code="google_chat_unavailable"),
+                status=503,
+            )
+
+        verify_fn = getattr(adapter, "verify_http_event_request", None)
+        if not callable(verify_fn):
+            return web.json_response(
+                _openai_error("Google Chat HTTP event verification is unavailable", code="google_chat_http_events_unavailable"),
+                status=503,
+            )
+        verify_error = verify_fn(request.headers.get("Authorization", ""))
+        if verify_error:
+            return web.json_response(
+                _openai_error("Invalid Google Chat HTTP event token", code=str(verify_error)),
+                status=401,
+            )
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response(
+                _openai_error("Request body must be valid JSON", code="invalid_json"),
+                status=400,
+            )
+        if not isinstance(body, dict):
+            return web.json_response(
+                _openai_error("Request body must be a JSON object", code="invalid_request"),
+                status=400,
+            )
+
+        result = await adapter.dispatch_http_event(body)
+        if not isinstance(result, dict):
+            result = {}
+        return web.json_response(result)
 
     # ------------------------------------------------------------------
     # Session header helpers
@@ -4167,6 +4261,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/skills", self._handle_skills)
             self._app.router.add_get("/v1/toolsets", self._handle_toolsets)
+            self._app.router.add_post("/google-chat/actions", self._handle_google_chat_action)
+            self._app.router.add_post("/google-chat/events", self._handle_google_chat_event)
             # Session/client control surface (thin wrappers over SessionDB + _run_agent)
             self._app.router.add_get("/api/sessions", self._handle_list_sessions)
             self._app.router.add_post("/api/sessions", self._handle_create_session)
@@ -4201,6 +4297,8 @@ class APIServerAdapter(BasePlatformAdapter):
             # native routes first lets those shims no-op instead of shadowing the
             # upstream session-control handlers.
             self._app["api_server_adapter"] = self
+            if self.gateway_runner is not None:
+                self._app["gateway_runner"] = self.gateway_runner
 
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
