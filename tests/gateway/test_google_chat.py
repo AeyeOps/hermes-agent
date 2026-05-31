@@ -300,6 +300,17 @@ class TestEnvConfigLoading:
         cfg = load_gateway_config()
         assert _GC not in cfg.platforms
 
+    def test_http_events_enable_without_pubsub(self, monkeypatch):
+        self._clean_env(monkeypatch)
+        monkeypatch.setenv("GOOGLE_CHAT_HTTP_EVENTS_URL", "https://example.test/google-chat/events")
+        cfg = load_gateway_config()
+        assert _GC in cfg.platforms
+        assert (
+            cfg.platforms[_GC].extra["http_events_url"]
+            == "https://example.test/google-chat/events"
+        )
+        assert "subscription_name" not in cfg.platforms[_GC].extra
+
     def test_missing_project_does_not_enable(self, monkeypatch):
         self._clean_env(monkeypatch)
         monkeypatch.setenv("GOOGLE_CHAT_SUBSCRIPTION_NAME",
@@ -330,6 +341,7 @@ class TestEnvConfigLoading:
         assert os.environ["GOOGLE_CHAT_PROJECT_NUMBER"] == "123456789012"
         assert seeded["card_action_transport"] == "addon_http"
         assert os.environ["GOOGLE_CHAT_CARD_ACTION_TRANSPORT"] == "addon_http"
+        self._clean_env(monkeypatch)
 
 
 
@@ -520,17 +532,27 @@ class TestGoogleOwnedHost:
 
 
 class TestValidateConfig:
-    def test_missing_project_raises(self):
+    def test_missing_project_raises(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CHAT_HTTP_EVENTS_URL", raising=False)
         a = GoogleChatAdapter(PlatformConfig(enabled=True))
         with pytest.raises(ValueError, match="PROJECT"):
             a._validate_config()
 
-    def test_missing_subscription_raises(self):
+    def test_missing_subscription_raises(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CHAT_HTTP_EVENTS_URL", raising=False)
         cfg = PlatformConfig(enabled=True)
         cfg.extra["project_id"] = "p"
         a = GoogleChatAdapter(cfg)
         with pytest.raises(ValueError, match="SUBSCRIPTION"):
             a._validate_config()
+
+    def test_http_events_mode_does_not_require_pubsub(self):
+        cfg = PlatformConfig(enabled=True)
+        cfg.extra["http_events_url"] = "https://example.test/google-chat/events"
+        a = GoogleChatAdapter(cfg)
+        project, sub = a._validate_config()
+        assert project == ""
+        assert sub is None
 
     def test_subscription_format_rejected(self):
         cfg = _base_config(subscription_name="not-a-valid-path")
@@ -552,6 +574,46 @@ class TestValidateConfig:
         project, sub = a._validate_config()
         assert project == "test-project"
         assert sub == "projects/test-project/subscriptions/test-sub"
+
+    def test_full_subscription_can_infer_project(self):
+        cfg = PlatformConfig(enabled=True)
+        cfg.extra["subscription_name"] = "projects/inferred/subscriptions/test-sub"
+        a = GoogleChatAdapter(cfg)
+        project, sub = a._validate_config()
+        assert project == "inferred"
+        assert sub == "projects/inferred/subscriptions/test-sub"
+
+
+class TestConnectModes:
+    @pytest.mark.asyncio
+    async def test_connect_http_mode_skips_pubsub_subscriber(self, monkeypatch):
+        cfg = PlatformConfig(enabled=True)
+        cfg.extra.update(
+            {
+                "http_events_url": "https://example.test/google-chat/events",
+                "service_account_json": '{"client_email":"bot@example.test"}',
+            }
+        )
+        a = GoogleChatAdapter(cfg)
+        creds = MagicMock()
+        chat_api = MagicMock()
+        subscriber_ctor = MagicMock()
+
+        monkeypatch.setattr(_gc_mod, "_load_google_modules", lambda: True)
+        monkeypatch.setattr(_gc_mod, "build_service", MagicMock(return_value=chat_api))
+        monkeypatch.setattr(_gc_mod.pubsub_v1, "SubscriberClient", subscriber_ctor)
+        monkeypatch.setattr(a, "_load_sa_credentials", MagicMock(return_value=creds))
+        monkeypatch.setattr(a, "_resolve_bot_user_id", AsyncMock(return_value=None))
+        monkeypatch.setattr(a._thread_count_store, "load", MagicMock())
+
+        ok = await a.connect()
+
+        assert ok is True
+        assert a.is_connected is True
+        assert a._subscription_path is None
+        assert a._supervisor_task is None
+        subscriber_ctor.assert_not_called()
+        await a.disconnect()
 
 
 # ===========================================================================
