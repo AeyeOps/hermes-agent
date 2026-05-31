@@ -12,8 +12,6 @@ scratch work live here instead.
 - `runbook.md` — generic operational notes for installing, updating, and
   running this fork against a live gateway. Kept deliberately host-agnostic
   so it's safe in a public fork.
-- `googlechat/` — design notes, spec, architecture decisions, and runbooks for
-  the Google Chat platform adapter.
 - `portal/` — secured HTTPS exposure plan, Caddy/systemd templates, and
   headless setup/verify scripts for the Authelia-protected portal stack.
 - `scripts/` — fork-local operational scripts for managing an AEyeOps Hermes

@@ -150,12 +150,10 @@ from gateway.platforms.base import (
 logger = logging.getLogger("gateway.platforms.google_chat")
 
 
-_ENV_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
-    ("GOOGLE_CHAT_PROJECT_ID", ("GOOGLE_CLOUD_PROJECT", "GOOGLECHAT_PUBSUB_PROJECT")),
-    ("GOOGLE_CHAT_SUBSCRIPTION_NAME", ("GOOGLE_CHAT_SUBSCRIPTION", "GOOGLECHAT_PUBSUB_SUBSCRIPTION")),
-    ("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON", ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLECHAT_SERVICE_ACCOUNT_JSON")),
-    ("GOOGLE_CHAT_ALLOWED_USERS", ("GOOGLECHAT_ALLOWED_USERS",)),
-    ("GOOGLE_CHAT_HOME_CHANNEL", ("GOOGLECHAT_HOME_CHANNEL",)),
+_STANDARD_ENV_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("GOOGLE_CHAT_PROJECT_ID", ("GOOGLE_CLOUD_PROJECT",)),
+    ("GOOGLE_CHAT_SUBSCRIPTION_NAME", ("GOOGLE_CHAT_SUBSCRIPTION",)),
+    ("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON", ("GOOGLE_APPLICATION_CREDENTIALS",)),
 )
 
 
@@ -168,17 +166,10 @@ def _env_value(*names: str) -> str:
     return ""
 
 
-def _bridge_legacy_env_aliases() -> None:
-    """Populate canonical ``GOOGLE_CHAT_*`` env vars from legacy aliases.
-
-    Hermes 0.15 pluginized Google Chat under the ``google_chat`` platform name
-    and renamed the setup variables from ``GOOGLECHAT_*`` to
-    ``GOOGLE_CHAT_*``. Existing installations may still have only the legacy
-    variables in ``~/.hermes/.env``; bridge them in-process so a code update
-    does not silently drop the platform from gateway startup.
-    """
+def _bridge_standard_env_aliases() -> None:
+    """Populate canonical ``GOOGLE_CHAT_*`` env vars from standard Google aliases."""
     bridged: List[str] = []
-    for canonical, aliases in _ENV_ALIASES:
+    for canonical, aliases in _STANDARD_ENV_ALIASES:
         if os.getenv(canonical):
             continue
         for alias in aliases:
@@ -189,7 +180,7 @@ def _bridge_legacy_env_aliases() -> None:
                 break
     if bridged:
         logger.info(
-            "[GoogleChat] bridged legacy env aliases for %s",
+            "[GoogleChat] bridged standard env aliases for %s",
             ", ".join(bridged),
         )
 
@@ -856,21 +847,19 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
         Priority:
           1. Explicit ``extra['service_account_json']`` (path or inline JSON)
-          2. ``GOOGLE_CHAT_SERVICE_ACCOUNT_JSON``,
-             ``GOOGLE_APPLICATION_CREDENTIALS``, or legacy
-             ``GOOGLECHAT_SERVICE_ACCOUNT_JSON`` env var (path)
+          2. ``GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`` or
+             ``GOOGLE_APPLICATION_CREDENTIALS`` env var (path)
           3. Application Default Credentials via ``google.auth.default()``
              — works on Cloud Run / GCE / GKE with a workload identity
              attached, or locally via ``gcloud auth application-default
              login``. Lets operators run the gateway in GCP without
              managing SA key files. Pattern lifted from PR #14965.
         """
-        _bridge_legacy_env_aliases()
+        _bridge_standard_env_aliases()
         sa_path = (
             self.config.extra.get("service_account_json")
             or os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
             or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            or os.getenv("GOOGLECHAT_SERVICE_ACCOUNT_JSON")
         )
         if sa_path:
             # Inline JSON (rare, but supported).
@@ -909,8 +898,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if google_auth is None:
             raise ValueError(
                 "No Service Account credentials configured. Set "
-                "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON, GOOGLE_APPLICATION_CREDENTIALS, "
-                "or GOOGLECHAT_SERVICE_ACCOUNT_JSON, "
+                "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS, "
                 "or install google-auth to use Application Default Credentials."
             )
         try:
@@ -919,8 +907,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
             raise ValueError(
                 "No Service Account credentials configured and Application "
                 "Default Credentials are unavailable. Set "
-                "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON (or legacy "
-                "GOOGLECHAT_SERVICE_ACCOUNT_JSON) or run "
+                "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON or run "
                 "``gcloud auth application-default login``. "
                 f"ADC error: {exc}"
             ) from exc
@@ -3401,23 +3388,19 @@ def _check_for_registry() -> bool:
 
     The registry pass at ``gateway/config.py:_apply_env_overrides`` adds
     the platform to ``cfg.platforms`` whenever ``check_fn`` returns True.
-    For backward compat with the pre-plugin behavior, we ALSO require
-    the minimum Pub/Sub env vars so an unconfigured user doesn't
-    accidentally see ``google_chat`` enabled. This matches the legacy
-    ``if gc_project and gc_subscription`` gate.
+    Require the minimum Pub/Sub env vars so an unconfigured user doesn't
+    accidentally see ``google_chat`` enabled.
     """
-    _bridge_legacy_env_aliases()
+    _bridge_standard_env_aliases()
     if not check_google_chat_requirements():
         return False
     project = _env_value(
         "GOOGLE_CHAT_PROJECT_ID",
         "GOOGLE_CLOUD_PROJECT",
-        "GOOGLECHAT_PUBSUB_PROJECT",
     )
     subscription = _env_value(
         "GOOGLE_CHAT_SUBSCRIPTION_NAME",
         "GOOGLE_CHAT_SUBSCRIPTION",
-        "GOOGLECHAT_PUBSUB_SUBSCRIPTION",
     )
     return bool(project and subscription)
 
@@ -3441,18 +3424,16 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     core hook — it becomes a proper ``HomeChannel`` dataclass on the
     ``PlatformConfig`` rather than being merged into ``extra``.
     """
-    _bridge_legacy_env_aliases()
+    _bridge_standard_env_aliases()
     project = _env_value(
         "GOOGLE_CHAT_PROJECT_ID",
         "GOOGLE_CLOUD_PROJECT",
-        "GOOGLECHAT_PUBSUB_PROJECT",
     )
     subscription = _normalize_subscription_name(
         project,
         _env_value(
             "GOOGLE_CHAT_SUBSCRIPTION_NAME",
             "GOOGLE_CHAT_SUBSCRIPTION",
-            "GOOGLECHAT_PUBSUB_SUBSCRIPTION",
         ),
     )
     if not (project and subscription):
@@ -3464,11 +3445,10 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     sa_json = _env_value(
         "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
         "GOOGLE_APPLICATION_CREDENTIALS",
-        "GOOGLECHAT_SERVICE_ACCOUNT_JSON",
     )
     if sa_json:
         seed["service_account_json"] = sa_json
-    home = _env_value("GOOGLE_CHAT_HOME_CHANNEL", "GOOGLECHAT_HOME_CHANNEL")
+    home = _env_value("GOOGLE_CHAT_HOME_CHANNEL")
     if home:
         seed["home_channel"] = {
             "chat_id": home,
@@ -3498,7 +3478,6 @@ def interactive_setup() -> None:
     existing_sub = (
         get_env_value("GOOGLE_CHAT_SUBSCRIPTION_NAME")
         or get_env_value("GOOGLE_CHAT_SUBSCRIPTION")
-        or get_env_value("GOOGLECHAT_PUBSUB_SUBSCRIPTION")
     )
     if existing_sub:
         print_info(f"Google Chat: already configured (subscription: {existing_sub})")
@@ -3526,7 +3505,6 @@ def interactive_setup() -> None:
         default=(
             get_env_value("GOOGLE_CHAT_PROJECT_ID")
             or get_env_value("GOOGLE_CLOUD_PROJECT")
-            or get_env_value("GOOGLECHAT_PUBSUB_PROJECT")
             or ""
         ),
     )
@@ -3540,7 +3518,6 @@ def interactive_setup() -> None:
         default=(
             get_env_value("GOOGLE_CHAT_SUBSCRIPTION_NAME")
             or get_env_value("GOOGLE_CHAT_SUBSCRIPTION")
-            or get_env_value("GOOGLECHAT_PUBSUB_SUBSCRIPTION")
             or ""
         ),
     )
@@ -3554,7 +3531,6 @@ def interactive_setup() -> None:
         default=(
             get_env_value("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
             or get_env_value("GOOGLE_APPLICATION_CREDENTIALS")
-            or get_env_value("GOOGLECHAT_SERVICE_ACCOUNT_JSON")
             or ""
         ),
         password=True,
@@ -3567,7 +3543,6 @@ def interactive_setup() -> None:
             "Allowed user emails (comma-separated)",
             default=(
                 get_env_value("GOOGLE_CHAT_ALLOWED_USERS")
-                or get_env_value("GOOGLECHAT_ALLOWED_USERS")
                 or ""
             ),
         )
@@ -3584,7 +3559,6 @@ def interactive_setup() -> None:
         "Home space for cron/notification delivery (e.g. spaces/AAAA, or empty)",
         default=(
             get_env_value("GOOGLE_CHAT_HOME_CHANNEL")
-            or get_env_value("GOOGLECHAT_HOME_CHANNEL")
             or ""
         ),
     )
@@ -3651,13 +3625,12 @@ async def _standalone_send(
         )}
 
     extra = getattr(pconfig, "extra", {}) or {}
-    _bridge_legacy_env_aliases()
+    _bridge_standard_env_aliases()
     sa_value = (
         extra.get("service_account_json")
         or _env_value(
             "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
             "GOOGLE_APPLICATION_CREDENTIALS",
-            "GOOGLECHAT_SERVICE_ACCOUNT_JSON",
         )
     )
 
@@ -3855,7 +3828,7 @@ def register(ctx) -> None:
     BEFORE its built-in if/elif chain, so this registration is what
     drives adapter creation at runtime.
     """
-    _bridge_legacy_env_aliases()
+    _bridge_standard_env_aliases()
     ctx.register_tool(
         name="send_google_chat_card",
         toolset="google_chat",

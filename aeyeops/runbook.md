@@ -58,7 +58,7 @@ Consequences when debugging:
 
 - `/proc/<pid>/environ` on the running gateway shows **only** systemd's
   direct `Environment=` lines (`HOME`, `PATH`, `HERMES_HOME`, …). It does
-  not show `TELEGRAM_BOT_TOKEN`, `GOOGLECHAT_SERVICE_ACCOUNT_JSON`, etc.
+  not show `TELEGRAM_BOT_TOKEN`, `GOOGLE_CHAT_SERVICE_ACCOUNT_JSON`, etc.
   That absence is not a bug.
 - To test whether an env change "takes" without restarting, invoke
   `load_hermes_dotenv()` explicitly in a Python interpreter with the same
