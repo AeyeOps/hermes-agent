@@ -398,11 +398,6 @@ $domain {
 		format console
 	}
 
-	forward_auth 127.0.0.1:$AUTHELIA_PORT {
-		uri /api/authz/forward-auth
-		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
-	}
-
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -410,11 +405,39 @@ $domain {
 		X-Frame-Options "DENY"
 	}
 
-	reverse_proxy 127.0.0.1:$port {
+	@portal_async path /api/* /health /sw.js /manifest.json /static/* /assets/* /favicon.ico
+	handle @portal_async {
+		forward_auth 127.0.0.1:$AUTHELIA_PORT {
+			uri /api/authz/forward-auth
+			copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+			@auth_expired status 3xx 401 403
+			handle_response @auth_expired {
+				header Content-Type application/json
+				header Cache-Control no-store
+				respond \`{"error":"auth_required"}\` 401
+			}
+		}
+		reverse_proxy 127.0.0.1:$port {
 CADDY
   [[ -n "$host_rewrite" ]] && printf '\t\theader_up Host %s\n' "$host_rewrite"
   cat <<'CADDY'
-		header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	handle {
+CADDY
+  cat <<CADDY
+		forward_auth 127.0.0.1:$AUTHELIA_PORT {
+			uri /api/authz/forward-auth
+			copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+		}
+		reverse_proxy 127.0.0.1:$port {
+CADDY
+  [[ -n "$host_rewrite" ]] && printf '\t\theader_up Host %s\n' "$host_rewrite"
+  cat <<'CADDY'
+			header_up X-Forwarded-Proto https
+		}
 	}
 }
 CADDY

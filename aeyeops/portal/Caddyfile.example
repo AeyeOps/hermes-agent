@@ -13,11 +13,6 @@ auth.example.com {
 }
 
 (dashboard_or_app_authelia_gate) {
-	forward_auth 127.0.0.1:9091 {
-		uri /api/authz/forward-auth
-		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
-	}
-
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -26,27 +21,78 @@ auth.example.com {
 	}
 }
 
+(dashboard_or_app_async_auth_gate) {
+	forward_auth 127.0.0.1:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+		@auth_expired status 3xx 401 403
+		handle_response @auth_expired {
+			header Content-Type application/json
+			header Cache-Control no-store
+			respond `{"error":"auth_required"}` 401
+		}
+	}
+}
+
+(dashboard_or_app_navigation_auth_gate) {
+	forward_auth 127.0.0.1:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+	}
+}
+
 dashboard.example.com {
 	encode zstd gzip
 	import dashboard_or_app_authelia_gate
-	reverse_proxy 127.0.0.1:9119 {
-		header_up Host 127.0.0.1:9119
-		header_up X-Forwarded-Proto https
+	@portal_async path /api/* /health /sw.js /manifest.json /static/* /assets/* /favicon.ico
+	handle @portal_async {
+		import dashboard_or_app_async_auth_gate
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host 127.0.0.1:9119
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		import dashboard_or_app_navigation_auth_gate
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host 127.0.0.1:9119
+			header_up X-Forwarded-Proto https
+		}
 	}
 }
 
 webui.example.com {
 	encode zstd gzip
 	import dashboard_or_app_authelia_gate
-	reverse_proxy 127.0.0.1:8787 {
-		header_up X-Forwarded-Proto https
+	@portal_async path /api/* /health /sw.js /manifest.json /static/* /assets/* /favicon.ico
+	handle @portal_async {
+		import dashboard_or_app_async_auth_gate
+		reverse_proxy 127.0.0.1:8787 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		import dashboard_or_app_navigation_auth_gate
+		reverse_proxy 127.0.0.1:8787 {
+			header_up X-Forwarded-Proto https
+		}
 	}
 }
 
 mc.example.com {
 	encode zstd gzip
 	import dashboard_or_app_authelia_gate
-	reverse_proxy 127.0.0.1:3000 {
-		header_up X-Forwarded-Proto https
+	@portal_async path /api/* /health /sw.js /manifest.json /static/* /assets/* /favicon.ico
+	handle @portal_async {
+		import dashboard_or_app_async_auth_gate
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		import dashboard_or_app_navigation_auth_gate
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Forwarded-Proto https
+		}
 	}
 }
