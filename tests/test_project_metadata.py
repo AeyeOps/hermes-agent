@@ -251,3 +251,17 @@ def test_nested_bundled_plugin_metadata_is_packaged():
     assert "**/plugin.yaml" in plugin_data
     assert "**/plugin.yml" in plugin_data
     assert "**/README.md" in plugin_data
+
+
+def test_dashboard_plugin_manifest_assets_exist():
+    import json
+
+    plugins_root = Path(__file__).resolve().parents[1] / "plugins"
+    for manifest_file in plugins_root.glob("*/dashboard/manifest.json"):
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        dashboard_dir = manifest_file.parent
+        entry = manifest.get("entry", "dist/index.js")
+        assert (dashboard_dir / entry).is_file(), f"{manifest_file}: missing entry {entry}"
+        css = manifest.get("css")
+        if css:
+            assert (dashboard_dir / css).is_file(), f"{manifest_file}: missing css {css}"

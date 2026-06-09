@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HERMES_HOME=HERMES_HOME_PLACEHOLDER
+Environment=HERMES_DASHBOARD_TUI=1
 WorkingDirectory=HERMES_HOME_PLACEHOLDER/hermes-agent
 ExecStart=HERMES_HOME_PLACEHOLDER/hermes-agent/venv/bin/python -m hermes_cli.main dashboard --host 127.0.0.1 --port 9119 --no-open
 Restart=on-failure

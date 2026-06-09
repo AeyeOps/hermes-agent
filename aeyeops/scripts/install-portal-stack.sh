@@ -577,6 +577,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=HERMES_HOME=$HERMES_HOME
+Environment=HERMES_DASHBOARD_TUI=1
 WorkingDirectory=$REPO_DIR
 ExecStart=$python_bin -m hermes_cli.main $dashboard_args
 Restart=on-failure

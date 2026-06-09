@@ -21,8 +21,8 @@ Example public hostnames for rollout docs:
   directly to `0.0.0.0`.
 - Do not generate browser-owned authentication modal gates as part of the portal
   install path.
-- Do not enable the embedded TUI/chat surface until the base dashboard exposure
-  has been verified.
+- Keep the embedded TUI/chat surface behind the same loopback, Caddy, and
+  Authelia controls as the rest of the dashboard.
 
 ## Why Caddy and Authelia are both used
 

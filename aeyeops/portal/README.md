@@ -107,6 +107,5 @@ not a browser-owned authentication modal.
 
 ## Embedded TUI/chat
 
-Leave embedded TUI/chat off for first exposure. After HTTPS/auth/firewall checks
-are proven, update the dashboard service intentionally if the browser-based chat
-surface is wanted.
+The dashboard service enables embedded TUI/chat by default and remains loopback
+only behind Caddy and Authelia.
