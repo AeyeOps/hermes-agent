@@ -1,5 +1,75 @@
 # Hermes Agent - Development Guide
 
+## AEyeOps Local Operating Rules (do not upstream)
+
+This checkout is both a live Hermes installation workspace and a public-fork
+development tree. Treat live safety, public-fork hygiene, and upstreamability as
+separate concerns.
+
+### Default operating posture
+
+- Evidence first: inspect files, git refs, service units, process cwd/environ,
+  logs, and command output before classifying runtime state or delete safety.
+- Keep changes surgical. Prefer executable code, tests, config examples, and
+  validation scripts over prose. Do not add plans, runbooks, ADRs, or long
+  comments unless explicitly requested.
+- Public fork safety is mandatory: never commit secrets, tokens, local absolute
+  paths, origin IPs, private hostnames, account identifiers, or host-local
+  runtime config. Sanitize tracked content before every push.
+- Live system safety: do not overwrite `~/.hermes`, systemd units, Caddy,
+  Authelia, Cloudflare, Google service accounts, memory stores, or Codex/Hermes
+  auth without first identifying the active file/service and preserving a
+  rollback path.
+- Use local ignored scratch under `aeyeops/tmp/` for prompts, transcripts,
+  checkpoints, and one-off notes. Do not create new persistent docs by default.
+
+### Branch and upstream PR discipline
+
+- `aeyeops-main` is the live/fork operations branch. Keep AEyeOps deployment
+  automation and local MO there unless the user explicitly wants upstream work.
+- Upstream PRs should be based on current `upstream/main`, not stale fork state.
+  Use a clean branch/worktree, port the minimum diff, and avoid unrelated
+  AEyeOps files.
+- Upstream PRs must be one logical change each. Do not mix a bug fix, refactor,
+  feature, docs cleanup, and deployment change in one PR.
+- Prefer the smallest implementation that fixes the shared code path. Add narrow
+  regression tests and include exact reproduction/validation in the PR body.
+- Use conventional commits, e.g. `fix(gateway): ...`, `feat(google-chat): ...`,
+  `test(tools): ...`.
+
+### Testing and validation
+
+- Use `scripts/run_tests.sh` for Python tests; do not call bare `pytest` for
+  final validation. Targeted tests are fine before full-suite runs.
+- For shell scripts, run `bash -n` and `shellcheck` when available.
+- For portal changes, validate Caddy config, Authelia config, service status,
+  local loopback health, and outside-in redirects/login behavior.
+- For gateway/platform changes, validate the real gateway service, logs, pairing
+  state, DM path, Space/channel path, and any platform-specific interactive
+  feature being touched.
+
+### Hermes/Codex/Hindsight auth and memory
+
+- If Codex was re-logged-in and Hermes needs rebinding, do not suggest a fresh
+  `codex login` by default. Import/rebind the already-minted CLI token into
+  Hermes auth, then verify Hermes and any LiteLLM bridge behavior.
+- Do not disable or replace the active memory provider without explicit user
+  approval. Verify local-vs-SaaS behavior from config, service processes, logs,
+  and network endpoints before claiming memory state.
+- Preserve existing memories and auth material. Back up before migrations, and
+  prefer additive/idempotent scripts with dry-run validation.
+
+### Documentation/comment minimalism
+
+- For AEyeOps/fork-owned work, avoid new docs and long comments. If a doc is
+  unavoidable, keep it short, current-state oriented, and free of local history.
+- Do not churn upstream-owned documentation, comments, or docstrings just to
+  match local preferences. Upstream compatibility has priority.
+- When touching AEyeOps-owned docs already nearby, remove stale historical
+  material opportunistically instead of preserving narrative context.
+
+---
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
@@ -925,6 +995,31 @@ in config.yaml (or `HERMES_BACKGROUND_NOTIFICATIONS` env var):
 - `result` — only the final completion message
 - `error` — only the final message when exit code != 0
 - `off` — no watcher messages at all
+
+### Documentation and Comments Should Minimize Staleness
+
+For AEyeOps/fork-owned work, do not create new docs, plans, runbooks, ADRs, or
+long code comments by default. Prefer changing executable code, tests, schemas,
+and config examples that prove current behavior directly. Agents can inspect the
+current codebase; duplicated historical explanations become stale, increase
+token cost, and make future fixes harder.
+
+Do not churn upstream-owned documentation, comments, or docstrings just to match
+this preference. Upstream compatibility is higher priority. For upstreamable
+PRs, make only surgical documentation/comment changes required by the code
+change, reviewer request, or user-facing contract.
+
+When documentation is truly necessary in fork-owned surfaces, keep it short,
+current-state oriented, and tied to a stable user-facing contract. Avoid
+timelines, narrative history, local operations, "why we did this last week"
+notes, and references that mirror implementation details already visible in
+code. Repo-local scratch or handoff notes belong only in ignored locations such
+as `aeyeops/tmp/`.
+
+When editing fork-owned docs or comments nearby, opportunistically delete stale
+historical material instead of preserving it for context. Keep new docstrings
+and comments minimal: explain non-obvious invariants, security constraints, or
+external protocol quirks; do not restate what the code does line-by-line.
 
 ---
 
