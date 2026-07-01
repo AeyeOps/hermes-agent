@@ -28,12 +28,14 @@ class _FakeRequest:
         raw_body: bytes | None = None,
         content_length: int | None = None,
         remote="127.0.0.1",
+        match_info=None,
     ):
         self.query = query or {}
         self._json_payload = json_payload
         self._raw_body = raw_body
         self.content_length = content_length
         self.remote = remote
+        self.match_info = match_info or {}
 
     async def json(self):
         if isinstance(self._json_payload, Exception):
@@ -572,3 +574,235 @@ class TestMSGraphSourceIPAllowlist:
         """Env-var-style 'cidr1, cidr2' strings parse as a list."""
         adapter = _make_adapter(allowed_source_cidrs="10.0.0.0/8, 203.0.113.0/24")
         assert len(adapter._allowed_source_networks) == 2
+
+
+class TestMSGraphMultiRoute:
+    """Multi-tenant support: a routes: map gives each tenant its own
+    client_state, chat_id_template, accepted_resources, and prompt.
+
+    Backward compat: legacy flat config (no routes: map) behaves identically
+    to pre-multi-tenant versions. These tests assert the contract, not a
+    frozen implementation.
+    """
+
+    def _make_multi_route_adapter(self):
+        return _make_adapter(
+            routes={
+                "aeo": {
+                    "client_state": "aeo-secret",
+                    "chat_id_template": "msgraph:aeo:{subscriptionId}",
+                    "accepted_resources": ["me/messages"],
+                    "prompt": "[aeo] {change_type} on {resource}",
+                },
+                "pers": {
+                    "client_state": "pers-secret",
+                    "chat_id_template": "msgraph:pers:{subscriptionId}",
+                    "accepted_resources": ["me/events"],
+                    "prompt": "[pers] {change_type} on {resource}",
+                },
+            }
+        )
+
+    def test_routes_map_initializes_per_route_config(self):
+        """Invariant: every route in the map has its own client_state + template."""
+        adapter = self._make_multi_route_adapter()
+        assert set(adapter._routes.keys()) == {"aeo", "pers"}
+        assert adapter._routes["aeo"]["client_state"] == "aeo-secret"
+        assert adapter._routes["pers"]["client_state"] == "pers-secret"
+        assert adapter._routes["aeo"]["chat_id_template"] == "msgraph:aeo:{subscriptionId}"
+
+    def test_legacy_flat_config_still_works_no_routes_map(self):
+        """Invariant: no routes: map => adapter uses flat client_state (byte-identical to legacy)."""
+        adapter = _make_adapter()  # no routes key
+        assert adapter._routes == {}
+        assert adapter._client_state == "expected-client-state"
+
+    @pytest.mark.anyio
+    async def test_connect_requires_client_state_on_every_route(self):
+        """Invariant: a route missing client_state fails closed at connect."""
+        adapter = _make_adapter(
+            host="127.0.0.1",
+            routes={
+                "aeo": {"client_state": "aeo-secret"},
+                "pers": {},  # missing client_state
+            },
+        )
+        connected = await adapter.connect()
+        assert connected is False
+
+    @pytest.mark.anyio
+    async def test_named_route_uses_its_own_client_state(self):
+        """Invariant: aeo route accepts aeo-secret, rejects pers-secret."""
+        adapter = self._make_multi_route_adapter()
+        scheduled: list[tuple[dict, object]] = []
+
+        async def _capture(notification, event):
+            scheduled.append((notification, event))
+
+        adapter.set_notification_scheduler(_capture)
+        payload = {
+            "value": [
+                {
+                    "id": "n-1",
+                    "subscriptionId": "sub-aeo-1",
+                    "changeType": "updated",
+                    "resource": "me/messages/msg-1",
+                    "clientState": "aeo-secret",
+                }
+            ]
+        }
+        # request resolved via the /msgraph/aeo path
+        resp = await adapter._handle_notification(
+            _FakeRequest(json_payload=payload, match_info={"route_name": "aeo"})
+        )
+        assert resp.status == 202
+        await asyncio.sleep(0.05)
+        assert len(scheduled) == 1
+        # chat_id carries the tenant — this is the routing primitive
+        assert scheduled[0][1].source.chat_id == "msgraph:aeo:sub-aeo-1"
+
+    @pytest.mark.anyio
+    async def test_named_route_rejects_other_tenant_secret(self):
+        """Invariant: pers secret POSTed to aeo route = 403 (no cross-tenant leak)."""
+        adapter = self._make_multi_route_adapter()
+        scheduled: list[tuple[dict, object]] = []
+
+        async def _capture(notification, event):
+            scheduled.append((notification, event))
+
+        adapter.set_notification_scheduler(_capture)
+        payload = {
+            "value": [
+                {
+                    "id": "n-x",
+                    "subscriptionId": "sub-x",
+                    "changeType": "updated",
+                    "resource": "me/messages/msg-x",
+                    "clientState": "pers-secret",  # wrong tenant
+                }
+            ]
+        }
+        resp = await adapter._handle_notification(
+            _FakeRequest(json_payload=payload, match_info={"route_name": "aeo"})
+        )
+        assert resp.status == 403
+        assert len(scheduled) == 0
+
+    @pytest.mark.anyio
+    async def test_unknown_named_route_returns_404(self):
+        """Invariant: an unconfigured route name doesn't fall through to legacy secret."""
+        adapter = self._make_multi_route_adapter()
+        payload = {
+            "value": [
+                {
+                    "id": "n-y",
+                    "subscriptionId": "sub-y",
+                    "changeType": "updated",
+                    "resource": "me/messages/msg-y",
+                    "clientState": "expected-client-state",  # the legacy flat secret
+                }
+            ]
+        }
+        resp = await adapter._handle_notification(
+            _FakeRequest(json_payload=payload, match_info={"route_name": "rogue"})
+        )
+        assert resp.status == 404
+
+    @pytest.mark.anyio
+    async def test_per_route_chat_id_template_isolates_sessions(self):
+        """Invariant: same subscriptionId in different tenants => different chat_id
+        (different session). This is the V→Q guarantee."""
+        adapter = self._make_multi_route_adapter()
+        seen_chat_ids: list[str] = []
+
+        async def _capture(notification, event):
+            seen_chat_ids.append(event.source.chat_id)
+
+        adapter.set_notification_scheduler(_capture)
+        for tenant, secret, resource in [
+            ("aeo", "aeo-secret", "me/messages/m1"),
+            ("pers", "pers-secret", "me/events/e1"),
+        ]:
+            payload = {
+                "value": [
+                    {
+                        "id": f"n-{tenant}",
+                        "subscriptionId": "sub-shared",
+                        "changeType": "updated",
+                        "resource": resource,
+                        "clientState": secret,
+                    }
+                ]
+            }
+            resp = await adapter._handle_notification(
+                _FakeRequest(json_payload=payload, match_info={"route_name": tenant})
+            )
+            assert resp.status == 202
+        await asyncio.sleep(0.05)
+        # Same subscriptionId, but chat_ids differ because the tenant is encoded —
+        # the agent's session-key machinery will route these to separate sessions.
+        assert seen_chat_ids == ["msgraph:aeo:sub-shared", "msgraph:pers:sub-shared"]
+
+    @pytest.mark.anyio
+    async def test_per_route_accepted_resources_scoped(self):
+        """Invariant: aeo route only accepts me/messages; pers only me/events."""
+        adapter = self._make_multi_route_adapter()
+        scheduled: list[tuple[dict, object]] = []
+
+        async def _capture(notification, event):
+            scheduled.append((notification, event))
+
+        adapter.set_notification_scheduler(_capture)
+        # aeo route gets an events resource (not in its accepted list) → 400
+        payload = {
+            "value": [
+                {
+                    "id": "n-z",
+                    "subscriptionId": "sub-z",
+                    "changeType": "updated",
+                    "resource": "me/events/e1",
+                    "clientState": "aeo-secret",
+                }
+            ]
+        }
+        resp = await adapter._handle_notification(
+            _FakeRequest(json_payload=payload, match_info={"route_name": "aeo"})
+        )
+        assert resp.status == 400
+        assert len(scheduled) == 0
+
+    @pytest.mark.anyio
+    async def test_legacy_path_still_works_in_multi_route_mode(self):
+        """Invariant: the bare webhook_path falls back to flat fields even when
+        routes: is configured (migration safety)."""
+        adapter = _make_adapter(
+            client_state="legacy-secret",
+            accepted_resources=["me/messages"],
+            routes={
+                "aeo": {"client_state": "aeo-secret", "chat_id_template": "msgraph:aeo:{subscriptionId}"}
+            },
+        )
+        scheduled: list[tuple[dict, object]] = []
+
+        async def _capture(notification, event):
+            scheduled.append((notification, event))
+
+        adapter.set_notification_scheduler(_capture)
+        payload = {
+            "value": [
+                {
+                    "id": "n-legacy",
+                    "subscriptionId": "sub-legacy",
+                    "changeType": "updated",
+                    "resource": "me/messages/m1",
+                    "clientState": "legacy-secret",
+                }
+            ]
+        }
+        # bare webhook_path: no route_name in match_info
+        resp = await adapter._handle_notification(_FakeRequest(json_payload=payload))
+        assert resp.status == 202
+        await asyncio.sleep(0.05)
+        assert len(scheduled) == 1
+        # legacy default chat_id_template (no tenant tag)
+        assert scheduled[0][1].source.chat_id == "msgraph:sub-legacy"

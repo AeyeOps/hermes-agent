@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8646
 DEFAULT_WEBHOOK_PATH = "/msgraph/webhook"
+# Multi-tenant path prefix. When a `routes:` map is configured, each route is
+# served at ``{ROUTE_PATH_PREFIX}/{route_name}`` (e.g. ``/msgraph/aeo``),
+# mirroring the generic ``webhook`` platform's ``/webhooks/{route_name}``
+# pattern. The legacy single-tenant ``webhook_path`` continues to work
+# unchanged when no ``routes:`` map is present.
+ROUTE_PATH_PREFIX = "/msgraph"
+DEFAULT_CHAT_ID_TEMPLATE = "msgraph:{subscriptionId}"
 DEFAULT_MAX_SEEN_RECEIPTS = 5000
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 NotificationScheduler = Callable[[Dict[str, Any], MessageEvent], Awaitable[None] | None]
@@ -55,12 +62,6 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             extra.get("webhook_path", DEFAULT_WEBHOOK_PATH)
         )
         self._health_path: str = self._normalize_path(extra.get("health_path", "/health"))
-        self._accepted_resources: list[str] = [
-            str(value).strip()
-            for value in (extra.get("accepted_resources") or [])
-            if str(value).strip()
-        ]
-        self._client_state: Optional[str] = self._string_or_none(extra.get("client_state"))
         self._max_seen_receipts = max(
             1, int(extra.get("max_seen_receipts", DEFAULT_MAX_SEEN_RECEIPTS))
         )
@@ -70,6 +71,50 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         self._allowed_source_networks: list[ipaddress._BaseNetwork] = (
             self._parse_allowed_source_cidrs(extra.get("allowed_source_cidrs"))
         )
+
+        # Multi-tenant support: a ``routes:`` map mirrors the generic ``webhook``
+        # platform. Each route has its own ``client_state``, optional
+        # ``accepted_resources``, ``chat_id_template``, and ``prompt``. When
+        # ``routes:`` is absent, the legacy flat ``client_state`` /
+        # ``accepted_resources`` / ``prompt`` fields are treated as a single
+        # anonymous default route — byte-identical behavior to pre-multi-tenant
+        # config, so existing single-tenant deployments keep working unchanged.
+        self._routes: Dict[str, dict] = {}
+        routes_raw = extra.get("routes")
+        if isinstance(routes_raw, dict) and routes_raw:
+            for name, route_extra in routes_raw.items():
+                if not isinstance(route_extra, dict):
+                    continue
+                route_state = self._string_or_none(route_extra.get("client_state"))
+                self._routes[str(name)] = {
+                    "client_state": route_state,
+                    "accepted_resources": [
+                        str(value).strip()
+                        for value in (route_extra.get("accepted_resources") or [])
+                        if str(value).strip()
+                    ],
+                    "chat_id_template": str(
+                        route_extra.get("chat_id_template") or DEFAULT_CHAT_ID_TEMPLATE
+                    ),
+                    "prompt": str(route_extra.get("prompt") or ""),
+                }
+            if self._routes:
+                logger.info(
+                    "[msgraph_webhook] Multi-route mode: %d route(s) configured",
+                    len(self._routes),
+                )
+
+        # Legacy flat fields — used directly when no ``routes:`` map is present,
+        # and as defaults for the anonymous default route when ``routes:`` has no
+        # matching entry (backward compat for callers POSTing the bare webhook_path).
+        self._accepted_resources: list[str] = [
+            str(value).strip()
+            for value in (extra.get("accepted_resources") or [])
+            if str(value).strip()
+        ]
+        self._client_state: Optional[str] = self._string_or_none(extra.get("client_state"))
+        self._default_prompt: str = str(extra.get("prompt") or "")
+
         self._runner = None
         self._notification_scheduler: Optional[NotificationScheduler] = None
         self._seen_receipts: set[str] = set()
@@ -141,7 +186,20 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         return is_network_accessible(self._host) and not self._allowed_source_networks
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        if self._client_state is None:
+        # In multi-route mode, every route MUST have a client_state (the shared
+        # secret Graph echoes back). In legacy single-tenant mode the flat
+        # ``client_state`` is required. Either way, refusing to start without
+        # at least one validatable secret means a misconfigured deployment
+        # fails closed rather than accepting unauthenticated notifications.
+        if self._routes:
+            missing = [name for name, route in self._routes.items() if not route["client_state"]]
+            if missing:
+                logger.error(
+                    "[msgraph_webhook] Refusing to start: route(s) %s missing client_state",
+                    ", ".join(sorted(missing)),
+                )
+                return False
+        elif self._client_state is None:
             logger.error(
                 "[msgraph_webhook] Refusing to start without extra.client_state configured"
             )
@@ -160,18 +218,38 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         app.router.add_get(self._health_path, self._handle_health)
         app.router.add_get(self._webhook_path, self._handle_validation)
         app.router.add_post(self._webhook_path, self._handle_notification)
+        # Multi-tenant: serve each named route at /msgraph/{route_name}, mirroring
+        # the generic webhook platform's /webhooks/{route_name} pattern. The same
+        # handlers resolve the route from the path and apply per-route config.
+        # Registered unconditionally (even in single-tenant mode) so a deployment
+        # can migrate from flat config to a routes: map without changing URLs.
+        app.router.add_get(
+            f"{ROUTE_PATH_PREFIX}/{{route_name}}", self._handle_validation
+        )
+        app.router.add_post(
+            f"{ROUTE_PATH_PREFIX}/{{route_name}}", self._handle_notification
+        )
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
         self._mark_connected()
-        logger.info(
-            "[msgraph_webhook] Listening on %s:%d%s",
-            self._host,
-            self._port,
-            self._webhook_path,
-        )
+        if self._routes:
+            route_names = ", ".join(sorted(self._routes.keys()))
+            logger.info(
+                "[msgraph_webhook] Listening on %s:%d (routes: %s)",
+                self._host,
+                self._port,
+                route_names,
+            )
+        else:
+            logger.info(
+                "[msgraph_webhook] Listening on %s:%d%s",
+                self._host,
+                self._port,
+                self._webhook_path,
+            )
         return True
 
     async def disconnect(self) -> None:
@@ -262,15 +340,26 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         auth_rejected = 0
         other_rejected = 0
 
+        # Resolve per-route config once for this request (in multi-route mode
+        # the route is selected by the /msgraph/{route_name} path; in legacy
+        # mode _resolve_route returns the anonymous-default shape).
+        route = self._resolve_route(request)
+        route_is_named = bool(request.match_info.get("route_name"))
+        if route_is_named and not route.get("client_state"):
+            # Named route that isn't in the routes: map — reject rather than
+            # fall through to the legacy flat secret, which would silently
+            # accept notifications intended for a different (unconfigured) tenant.
+            return web.Response(status=404)
+
         for raw_notification in notifications:
             if not isinstance(raw_notification, dict):
                 other_rejected += 1
                 continue
             notification = dict(raw_notification)
-            if not self._resource_accepted(str(notification.get("resource") or "")):
+            if not self._resource_accepted(str(notification.get("resource") or ""), route):
                 other_rejected += 1
                 continue
-            if not self._verify_client_state(notification):
+            if not self._verify_client_state(notification, route):
                 # Treat bad clientState as an auth failure: if the whole
                 # batch is forged, we want to signal 403 so the sender
                 # stops retrying. Legitimate Graph retries have valid
@@ -287,7 +376,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
 
             accepted += 1
             self._accepted_count += 1
-            event = self._build_message_event(notification, receipt_key)
+            event = self._build_message_event(notification, receipt_key, route)
             self._schedule_notification(notification, event)
 
         self._duplicate_count += duplicates
@@ -323,11 +412,14 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             return False
         return any(peer_addr in network for network in self._allowed_source_networks)
 
-    def _resource_accepted(self, resource: str) -> bool:
-        if not self._accepted_resources:
+    def _resource_accepted(self, resource: str, route: Optional[Dict[str, Any]] = None) -> bool:
+        accepted = (route or {}).get("accepted_resources") if route is not None else None
+        if accepted is None:
+            accepted = self._accepted_resources
+        if not accepted:
             return True
         normalized_resource = self._normalize_resource_value(resource)
-        for pattern in self._accepted_resources:
+        for pattern in accepted:
             normalized_pattern = self._normalize_resource_value(pattern)
             if not normalized_pattern:
                 continue
@@ -343,7 +435,36 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 return True
         return False
 
-    def _verify_client_state(self, notification: Dict[str, Any]) -> bool:
+    def _resolve_route(self, request: "web.Request") -> Dict[str, Any]:
+        """Resolve the per-route config for an inbound request.
+
+        Returns a dict with ``client_state``, ``accepted_resources``,
+        ``chat_id_template``, and ``prompt``. In multi-route mode the route
+        name is read from the path (``/msgraph/{route_name}``); an unknown
+        route name returns an empty dict and the caller rejects the request.
+        Requests to the legacy flat ``webhook_path``, or to a named route that
+        isn't configured, fall back to the legacy flat fields so existing
+        single-tenant deployments keep behaving identically.
+        """
+        route_name = request.match_info.get("route_name")
+        if route_name:
+            # A named route was requested via /msgraph/{route_name}. If it's
+            # configured, return its per-route config. If NOT configured, return
+            # an empty dict so the caller can 404 — do NOT silently fall through
+            # to the legacy flat secret, which would accept notifications meant
+            # for a different (unconfigured) tenant.
+            return self._routes.get(route_name, {})
+        # Legacy / anonymous-default path (bare webhook_path): synthesize a
+        # route from the flat fields so the rest of the pipeline has a uniform
+        # shape.
+        return {
+            "client_state": self._client_state,
+            "accepted_resources": self._accepted_resources,
+            "chat_id_template": DEFAULT_CHAT_ID_TEMPLATE,
+            "prompt": self._default_prompt,
+        }
+
+    def _verify_client_state(self, notification: Dict[str, Any], route: Optional[Dict[str, Any]] = None) -> bool:
         """Verify the Graph-supplied clientState matches the configured secret.
 
         Uses ``hmac.compare_digest`` instead of ``==`` so that a mismatch
@@ -352,7 +473,12 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         the setup guide as "generate with ``openssl rand -hex 32``"), so a
         timing-safe compare is the right primitive.
         """
-        expected = self._client_state
+        expected = (route or {}).get("client_state") if route is not None else self._client_state
+        if expected is None:
+            # Fall back to the legacy flat field when the route didn't carry one
+            # (covers the anonymous-default path in multi-route deployments
+            # that still POST the bare webhook_path).
+            expected = self._client_state
         if expected is None:
             return False
         provided = self._string_or_none(notification.get("clientState"))
@@ -374,17 +500,36 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         self,
         notification: Dict[str, Any],
         receipt_key: Optional[str],
+        route: Optional[Dict[str, Any]] = None,
     ) -> MessageEvent:
         message_id = receipt_key or f"sha1:{sha1(json.dumps(notification, sort_keys=True).encode('utf-8')).hexdigest()}"
+        template = (route or {}).get("chat_id_template") or DEFAULT_CHAT_ID_TEMPLATE
+        # Flatten notification fields into str.format kwargs. Graph notifications
+        # are JSON objects; str.format only accepts str/int/float values, so coerce
+        # and skip nested dicts/lists. Any field a template references that isn't
+        # present falls through to the default template (caught below).
+        format_kwargs = {
+            k: (str(v) if not isinstance(v, bool) else str(v).lower())
+            for k, v in notification.items()
+            if isinstance(v, (str, int, float))
+        }
+        try:
+            chat_id = template.format(**format_kwargs)
+        except (KeyError, IndexError):
+            # Template referenced a field the notification didn't carry — fall
+            # back to the default so a malformed template never drops the event.
+            chat_id = DEFAULT_CHAT_ID_TEMPLATE.format(
+                subscriptionId=str(notification.get("subscriptionId", "unknown"))
+            )
         source = self.build_source(
-            chat_id=f"msgraph:{notification.get('subscriptionId', 'unknown')}",
+            chat_id=chat_id,
             chat_name="msgraph/webhook",
             chat_type="webhook",
             user_id="msgraph",
             user_name="Microsoft Graph",
         )
         return MessageEvent(
-            text=self._render_prompt(notification),
+            text=self._render_prompt(notification, route),
             message_type=MessageType.TEXT,
             source=source,
             raw_message=notification,
@@ -392,8 +537,10 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             internal=True,
         )
 
-    def _render_prompt(self, notification: Dict[str, Any]) -> str:
-        template = self.config.extra.get("prompt", "")
+    def _render_prompt(self, notification: Dict[str, Any], route: Optional[Dict[str, Any]] = None) -> str:
+        # Per-route prompt wins, then the legacy flat ``prompt`` field, so an
+        # existing single-tenant ``prompt:`` config keeps rendering unchanged.
+        template = (route or {}).get("prompt") or self.config.extra.get("prompt", "")
         if template:
             payload = {
                 "notification": notification,
