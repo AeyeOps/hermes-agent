@@ -113,11 +113,6 @@ docs/superpowers/*
 # logs, and per-session caches are never artifacts of the codebase.
 .hermes/
 
-# Root-owned local state dir (system tools create this)
-.local/
-# Local scratch dir for operator notes/creds
-.tmp/ (chore(gitignore): ignore .local/ (root state) and .tmp/ (scratch))
-
 # Desktop/bootstrap install marker written into the managed checkout root by the
 # bootstrap installer. It is Hermes-managed runtime state, never a code change —
 # ignore it so `hermes update`'s `git stash push --include-untracked` does not
@@ -153,23 +148,7 @@ apps/desktop/demo/
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
 
-# Local OMX workflow/runtime state.
-.omx/
-
-# AeyeOps fork-local operational scratch and deployment secrets.
-# Keep reusable docs/templates/scripts tracked; keep host-local rendered configs,
-# password hashes, logs, and one-off operator notes out of the public fork.
-aeyeops/**/__pycache__/
-aeyeops/googlechat/verify/results/
-aeyeops/**/local/
-aeyeops/**/*.local
-aeyeops/**/*.local.*
-aeyeops/**/logs/
-aeyeops/**/backup/
-aeyeops/**/backups/
-aeyeops/**/*.bak
-aeyeops/**/*.db
-aeyeops/**/*.sqlite
-aeyeops/**/*.sqlite3
-aeyeops/**/*.tar
-aeyeops/**/*.tar.gz
+# AeyeOps local/runtime (not shipped)
+.tmp/
+.local/
+.graphifyignore
