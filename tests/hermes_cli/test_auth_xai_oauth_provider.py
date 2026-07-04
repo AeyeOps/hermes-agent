@@ -293,6 +293,80 @@ def test_read_xai_oauth_tokens_missing(tmp_path, monkeypatch):
     assert exc.value.relogin_required is True
 
 
+def test_read_xai_oauth_tokens_accepts_legacy_xai_oidc_state(tmp_path, monkeypatch):
+    """Older Grok OAuth bridge auth wrote flat tokens under providers.xai."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {
+            "xai": {
+                "auth_mode": "oidc",
+                "oidc_issuer": "https://auth.x.ai",
+                "oidc_client_id": XAI_OAUTH_CLIENT_ID,
+                "key": "legacy-access",
+                "refresh_token": "legacy-refresh",
+                "expires_at": "2026-07-01T15:29:02Z",
+            }
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    data = _read_xai_oauth_tokens()
+
+    assert data["tokens"]["access_token"] == "legacy-access"
+    assert data["tokens"]["refresh_token"] == "legacy-refresh"
+    assert data["tokens"]["token_type"] == "Bearer"
+
+
+def test_resolve_xai_runtime_credentials_migrates_legacy_xai_oidc_state(
+    tmp_path, monkeypatch
+):
+    """A refresh from legacy providers.xai persists into providers.xai-oauth."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    expired = _jwt_with_exp(int(time.time()) - 10)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {
+            "xai": {
+                "auth_mode": "oidc",
+                "oidc_issuer": "https://auth.x.ai",
+                "oidc_client_id": XAI_OAUTH_CLIENT_ID,
+                "key": expired,
+                "refresh_token": "legacy-refresh",
+            }
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(
+        "hermes_cli.auth._xai_oauth_discovery",
+        lambda _timeout: {"token_endpoint": "https://auth.x.ai/oauth2/token"},
+    )
+    new_access = _jwt_with_exp(int(time.time()) + 2 * 60 * 60)
+
+    def _fake_refresh_pure(access_token, refresh_token, **kwargs):
+        assert access_token == expired
+        assert refresh_token == "legacy-refresh"
+        assert kwargs["token_endpoint"] == "https://auth.x.ai/oauth2/token"
+        return {
+            "access_token": new_access,
+            "refresh_token": "rt-migrated",
+            "token_type": "Bearer",
+            "last_refresh": "2026-05-15T01:00:00Z",
+        }
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_xai_oauth_pure", _fake_refresh_pure)
+
+    creds = resolve_xai_oauth_runtime_credentials()
+
+    assert creds["api_key"] == new_access
+    raw = json.loads((hermes_home / "auth.json").read_text())
+    migrated = raw["providers"]["xai-oauth"]
+    assert migrated["tokens"]["access_token"] == new_access
+    assert migrated["tokens"]["refresh_token"] == "rt-migrated"
+
+
 def test_read_xai_oauth_tokens_missing_access_token(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     _setup_hermes_auth(hermes_home, access_token="")

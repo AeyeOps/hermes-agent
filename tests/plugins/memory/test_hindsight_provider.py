@@ -424,7 +424,7 @@ class TestConfig:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
+        monkeypatch.setitem(sys.modules, "hindsight_client", SimpleNamespace(Hindsight=FakeHindsightEmbedded))
         monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
 
         p = HindsightMemoryProvider()
@@ -436,12 +436,19 @@ class TestConfig:
             "llm_model": "test-model",
             "idle_timeout": 0,
         }
-        p._llm_base_url = "http://localhost:8060/v1"
+        p._api_url = "http://localhost:8888"
+        p._api_key = "embed-key"
+        p._timeout = 120
+        p._idle_timeout = 300
+        p._client = None
 
         p._get_client()
 
-        assert captured["idle_timeout"] == 0
-        assert captured["llm_provider"] == "openai"
+        # The embedded client connects to the running daemon via base_url
+        # (same as cloud mode). LLM config goes to the daemon via env, not
+        # the client constructor.
+        assert captured["base_url"] == "http://localhost:8888"
+        assert captured["api_key"] == "embed-key"
 
 
 class TestPostSetup:

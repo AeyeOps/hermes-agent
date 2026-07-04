@@ -133,7 +133,10 @@ def _check_local_runtime() -> tuple[bool, str | None]:
     a broken local memory backend.
     """
     try:
-        importlib.import_module("hindsight")
+        # The daemon lives in hindsight_embed.daemon_embed_manager. The bare
+        # ``hindsight`` module is the legacy server package and is NOT shipped
+        # by ``hindsight-embed``; requiring it would falsely gate embedded mode
+        # off. Probe only what the embedded daemon actually imports.
         importlib.import_module("hindsight_embed.daemon_embed_manager")
         return True, None
     except Exception as exc:
@@ -1026,21 +1029,20 @@ class HindsightMemoryProvider(MemoryProvider):
                     pass
                 except Exception as _e:
                     raise ImportError(str(_e))
-                from hindsight import HindsightEmbedded
-                HindsightEmbedded.__del__ = lambda self: None
+                # The embedded daemon is already running (started by
+                # DaemonEmbedManager) and receives its LLM config via the
+                # profile env file (_materialize_embedded_profile_env). The
+                # client just connects to it — same constructor as cloud mode.
+                from hindsight_client import Hindsight as HindsightEmbedded
                 llm_provider = self._config.get("llm_provider", "")
                 if llm_provider in {"openai_compatible", "openrouter"}:
                     llm_provider = "openai"
-                logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
-                             self._config.get("profile", "hermes"), llm_provider)
-                kwargs = dict(
-                    profile=self._config.get("profile", "hermes"),
-                    llm_provider=llm_provider,
-                    llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or os.environ.get("HINDSIGHT_LLM_API_KEY", ""),
-                    llm_model=self._config.get("llm_model", ""),
-                )
-                if self._llm_base_url:
-                    kwargs["llm_base_url"] = self._llm_base_url
+                logger.debug("Creating Hindsight client for embedded daemon (url=%s, provider=%s)",
+                             self._api_url, llm_provider)
+                timeout = self._timeout or _DEFAULT_TIMEOUT
+                kwargs = {"base_url": self._api_url, "timeout": float(timeout)}
+                if self._api_key:
+                    kwargs["api_key"] = self._api_key
                 idle_timeout = _parse_int_setting(
                     self._config.get("idle_timeout")
                     if self._config.get("idle_timeout") is not None
@@ -1048,7 +1050,6 @@ class HindsightMemoryProvider(MemoryProvider):
                     _DEFAULT_IDLE_TIMEOUT,
                 )
                 self._idle_timeout = idle_timeout
-                kwargs["idle_timeout"] = idle_timeout
                 self._client = HindsightEmbedded(**kwargs)
             else:
                 _ensure_cloud_client_dependency()
@@ -1399,6 +1400,19 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._mode = "disabled"
                 return
 
+            # If a daemon is already running (from a previous session or a
+            # concurrent process), resolve its actual URL NOW so the client
+            # connects to the right port instead of the default 8888.
+            try:
+                from hindsight_embed import get_embed_manager
+                _mgr = get_embed_manager()
+                _profile = self._config.get("profile", "hermes")
+                if _mgr.is_running(_profile):
+                    self._api_url = _mgr.get_url(_profile)
+                    logger.info("Hindsight daemon already running at %s", self._api_url)
+            except Exception:
+                pass  # Background thread will handle startup
+
             def _start_daemon():
                 import traceback
                 log_dir = get_hermes_home() / "logs"
@@ -1412,7 +1426,8 @@ class HindsightMemoryProvider(MemoryProvider):
                     from rich.console import Console
                     dem.console = Console(file=open(log_path, "a", encoding="utf-8"), force_terminal=False)
 
-                    client = self._get_client()
+                    from hindsight_embed import get_embed_manager
+                    mgr = get_embed_manager()
                     profile = self._config.get("profile", "hermes")
 
                     # Update the profile .env to match our current config so
@@ -1425,14 +1440,21 @@ class HindsightMemoryProvider(MemoryProvider):
 
                     if config_changed:
                         profile_env = _materialize_embedded_profile_env(self._config)
-                        if client._manager.is_running(profile):
+                        if mgr.is_running(profile):
                             with open(log_path, "a", encoding="utf-8") as f:
                                 f.write("\n=== Config changed, restarting daemon ===\n")
-                            client._manager.stop(profile)
+                            mgr.stop(profile)
 
-                    client._ensure_started()
+                    # Start the daemon with the LLM env config so the daemon
+                    # process gets the right provider/model/key/base_url.
+                    mgr.ensure_running(expected_env, profile)
+                    self._api_url = mgr.get_url(profile)
+                    # Invalidate cached client so the next operation creates a
+                    # fresh one pointing at the real daemon port (not the
+                    # default 8888 that _api_url had during startup).
+                    self._client = None
                     with open(log_path, "a", encoding="utf-8") as f:
-                        f.write("\n=== Daemon started successfully ===\n")
+                        f.write(f"\n=== Daemon started successfully at {self._api_url} ===\n")
                 except Exception as e:
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write(f"\n=== Daemon startup failed: {e} ===\n")

@@ -152,3 +152,33 @@ infographic/
 .tmp/
 .local/
 .graphifyignore
+
+# AeyeOps fork-local (from restore follow-ups)
+# AeyeOps fork-local operational scratch and deployment secrets.
+aeyeops/**/__pycache__/
+aeyeops/graphify-out/
+aeyeops/googlechat/verify/results/
+aeyeops/**/local/
+aeyeops/**/*.local
+aeyeops/**/*.local.*
+aeyeops/**/logs/
+aeyeops/**/backup/
+aeyeops/**/backups/
+aeyeops/**/*.bak
+aeyeops/**/*.db
+aeyeops/**/*.sqlite
+aeyeops/**/*.sqlite3
+aeyeops/**/*.tar
+aeyeops/**/*.tar.gz
+aeyeops/**/*.tgz
+aeyeops/**/*.zip
+aeyeops/**/*.zst
+aeyeops/**/*secret*
+aeyeops/**/*secrets*
+aeyeops/**/*password*
+aeyeops/**/*token*
+aeyeops/**/*credential*
+aeyeops/**/*credentials*
+aeyeops/**/*hash*
+aeyeops/**/*key.json
+.omx/

@@ -50,21 +50,21 @@ class _FakeRequest:
 
 class TestMSGraphWebhookConfig:
     def test_gateway_config_accepts_msgraph_webhook_platform(self):
-        config = GatewayConfig.from_dict(
-            {
-                "platforms": {
-                    "msgraph_webhook": {
-                        "enabled": True,
-                        "extra": {"client_state": "expected"},
-                    }
+        config = GatewayConfig.from_dict({
+            "platforms": {
+                "msgraph_webhook": {
+                    "enabled": True,
+                    "extra": {"client_state": "expected"},
                 }
             }
-        )
+        })
 
         assert Platform.MSGRAPH_WEBHOOK in config.platforms
         assert Platform.MSGRAPH_WEBHOOK in config.get_connected_platforms()
 
-    def test_env_overrides_apply_to_existing_msgraph_webhook_platform(self, monkeypatch):
+    def test_env_overrides_apply_to_existing_msgraph_webhook_platform(
+        self, monkeypatch
+    ):
         config = GatewayConfig(
             platforms={Platform.MSGRAPH_WEBHOOK: PlatformConfig(enabled=True, extra={})}
         )
@@ -316,7 +316,9 @@ class TestMSGraphNotifications:
         }
         await adapter._handle_notification(_FakeRequest(json_payload=payload))
 
-        assert calls, "hmac.compare_digest was never called; clientState check is not timing-safe"
+        assert calls, (
+            "hmac.compare_digest was never called; clientState check is not timing-safe"
+        )
         provided, expected = calls[0]
         assert provided == "expected-client-state"
         assert expected == "expected-client-state"
@@ -455,7 +457,9 @@ class TestMSGraphNotifications:
                     }
                 ]
             }
-            return await adapter._handle_notification(_FakeRequest(json_payload=payload))
+            return await adapter._handle_notification(
+                _FakeRequest(json_payload=payload)
+            )
 
         first = await _post("notif-a")
         second = await _post("notif-b")
@@ -609,7 +613,9 @@ class TestMSGraphMultiRoute:
         assert set(adapter._routes.keys()) == {"aeo", "pers"}
         assert adapter._routes["aeo"]["client_state"] == "aeo-secret"
         assert adapter._routes["pers"]["client_state"] == "pers-secret"
-        assert adapter._routes["aeo"]["chat_id_template"] == "msgraph:aeo:{subscriptionId}"
+        assert (
+            adapter._routes["aeo"]["chat_id_template"] == "msgraph:aeo:{subscriptionId}"
+        )
 
     def test_legacy_flat_config_still_works_no_routes_map(self):
         """Invariant: no routes: map => adapter uses flat client_state (byte-identical to legacy)."""
@@ -772,6 +778,74 @@ class TestMSGraphMultiRoute:
         assert len(scheduled) == 0
 
     @pytest.mark.anyio
+    async def test_prompt_template_resolves_graph_camelcase_fields(self):
+        """Regression: a prompt using Graph-native camelCase field names
+        (``{changeType}``, ``{subscriptionId}``) must resolve from the payload
+        instead of leaking through as a literal ``{changeType}``. The
+        snake_case aliases (``{change_type}``) continue to resolve too.
+        """
+        adapter = _make_adapter(
+            accepted_resources=["me/drive/root"],
+            prompt="[aeo] {changeType} on {resource} (sub {subscriptionId})",
+        )
+        scheduled: list[tuple[dict, object]] = []
+
+        async def _capture(notification, event):
+            scheduled.append((notification, event))
+
+        adapter.set_notification_scheduler(_capture)
+        payload = {
+            "value": [
+                {
+                    "id": "n-camel",
+                    "subscriptionId": "sub-camel",
+                    "changeType": "updated",
+                    "resource": "me/drive/root",
+                    "clientState": "expected-client-state",
+                }
+            ]
+        }
+        await adapter._handle_notification(_FakeRequest(json_payload=payload))
+        await asyncio.sleep(0.05)
+        assert len(scheduled) == 1
+        text = scheduled[0][1].text
+        assert "[aeo] updated on me/drive/root (sub sub-camel)" == text
+        assert "{changeType}" not in text
+
+    @pytest.mark.anyio
+    async def test_prompt_template_resolves_snake_case_aliases(self):
+        """Invariant: snake_case aliases (``{change_type}``) still resolve
+        alongside the Graph-native camelCase names, so older prompt configs
+        keep rendering identically.
+        """
+        adapter = _make_adapter(
+            accepted_resources=["me/messages"],
+            prompt="[pers] {change_type} on {resource}",
+        )
+        scheduled: list[tuple[dict, object]] = []
+
+        async def _capture(notification, event):
+            scheduled.append((notification, event))
+
+        adapter.set_notification_scheduler(_capture)
+        payload = {
+            "value": [
+                {
+                    "id": "n-snake",
+                    "subscriptionId": "sub-snake",
+                    "changeType": "created",
+                    "resource": "me/messages/m1",
+                    "clientState": "expected-client-state",
+                }
+            ]
+        }
+        await adapter._handle_notification(_FakeRequest(json_payload=payload))
+        await asyncio.sleep(0.05)
+        assert len(scheduled) == 1
+        text = scheduled[0][1].text
+        assert "[pers] created on me/messages/m1" == text
+
+    @pytest.mark.anyio
     async def test_legacy_path_still_works_in_multi_route_mode(self):
         """Invariant: the bare webhook_path falls back to flat fields even when
         routes: is configured (migration safety)."""
@@ -779,7 +853,10 @@ class TestMSGraphMultiRoute:
             client_state="legacy-secret",
             accepted_resources=["me/messages"],
             routes={
-                "aeo": {"client_state": "aeo-secret", "chat_id_template": "msgraph:aeo:{subscriptionId}"}
+                "aeo": {
+                    "client_state": "aeo-secret",
+                    "chat_id_template": "msgraph:aeo:{subscriptionId}",
+                }
             },
         )
         scheduled: list[tuple[dict, object]] = []

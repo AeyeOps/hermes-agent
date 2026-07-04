@@ -3847,9 +3847,71 @@ def _pool_codex_access_token() -> str:
 # xAI Grok OAuth — tokens stored in ~/.hermes/auth.json
 # =============================================================================
 
+def _legacy_xai_oidc_state_from_store(auth_store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return legacy flat ``providers.xai`` OAuth state, if present.
+
+    Early Grok OAuth bridge setups wrote the xAI OIDC grant under the API-key
+    provider id (``providers.xai``) with flat ``key`` / ``refresh_token`` fields.
+    Native Hermes OAuth now uses ``providers.xai-oauth.tokens``.  Accept the old
+    shape only when it is clearly an xAI OAuth grant; never treat an API key as
+    OAuth.
+    """
+    state = _load_provider_state(auth_store, "xai")
+    if not isinstance(state, dict):
+        return None
+    auth_mode = str(state.get("auth_mode") or "").strip().lower()
+    if auth_mode not in {"oidc", "oauth", "oauth_pkce"}:
+        return None
+    issuer = str(state.get("oidc_issuer") or state.get("issuer") or "").strip().rstrip("/")
+    if issuer and issuer != XAI_OAUTH_ISSUER:
+        return None
+    client_id = str(state.get("oidc_client_id") or state.get("client_id") or "").strip()
+    if client_id and client_id != XAI_OAUTH_CLIENT_ID:
+        return None
+    access_token = str(state.get("access_token") or state.get("key") or "").strip()
+    refresh_token = str(state.get("refresh_token") or "").strip()
+    if not access_token or not refresh_token:
+        return None
+
+    tokens: Dict[str, Any] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": str(state.get("token_type") or "Bearer").strip() or "Bearer",
+    }
+    if state.get("expires_at"):
+        tokens["expires_at"] = state.get("expires_at")
+    discovery: Dict[str, Any] = {}
+    raw_discovery = state.get("discovery")
+    if isinstance(raw_discovery, dict):
+        discovery.update(raw_discovery)
+    token_endpoint = str(state.get("token_endpoint") or "").strip()
+    if token_endpoint:
+        discovery = {**discovery, "token_endpoint": token_endpoint}
+    migrated: Dict[str, Any] = {
+        "tokens": tokens,
+        "auth_mode": "oauth_pkce",
+        "legacy_provider_id": "xai",
+    }
+    if discovery:
+        migrated["discovery"] = discovery
+    if state.get("redirect_uri"):
+        migrated["redirect_uri"] = state.get("redirect_uri")
+    if state.get("last_refresh"):
+        migrated["last_refresh"] = state.get("last_refresh")
+    return migrated
+
+
+def _xai_oauth_provider_state_from_store(auth_store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return xAI OAuth singleton state without reading the credential pool."""
+    state = _load_provider_state(auth_store, "xai-oauth")
+    if isinstance(state, dict):
+        return state
+    return _legacy_xai_oidc_state_from_store(auth_store)
+
+
 def _xai_oauth_state_from_store(auth_store: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Return usable xAI OAuth state from provider state or credential pool."""
-    state = _load_provider_state(auth_store, "xai-oauth")
+    state = _xai_oauth_provider_state_from_store(auth_store)
     tokens = state.get("tokens") if isinstance(state, dict) else None
     if isinstance(tokens, dict):
         access_token = str(tokens.get("access_token", "") or "").strip()

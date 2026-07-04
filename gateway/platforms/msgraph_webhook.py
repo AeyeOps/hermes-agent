@@ -61,7 +61,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         self._webhook_path: str = self._normalize_path(
             extra.get("webhook_path", DEFAULT_WEBHOOK_PATH)
         )
-        self._health_path: str = self._normalize_path(extra.get("health_path", "/health"))
+        self._health_path: str = self._normalize_path(
+            extra.get("health_path", "/health")
+        )
         self._max_seen_receipts = max(
             1, int(extra.get("max_seen_receipts", DEFAULT_MAX_SEEN_RECEIPTS))
         )
@@ -112,7 +114,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             for value in (extra.get("accepted_resources") or [])
             if str(value).strip()
         ]
-        self._client_state: Optional[str] = self._string_or_none(extra.get("client_state"))
+        self._client_state: Optional[str] = self._string_or_none(
+            extra.get("client_state")
+        )
         self._default_prompt: str = str(extra.get("prompt") or "")
 
         self._runner = None
@@ -179,7 +183,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 )
         return networks
 
-    def set_notification_scheduler(self, scheduler: Optional[NotificationScheduler]) -> None:
+    def set_notification_scheduler(
+        self, scheduler: Optional[NotificationScheduler]
+    ) -> None:
         self._notification_scheduler = scheduler
 
     def _source_allowlist_required_but_missing(self) -> bool:
@@ -192,7 +198,11 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         # at least one validatable secret means a misconfigured deployment
         # fails closed rather than accepting unauthenticated notifications.
         if self._routes:
-            missing = [name for name, route in self._routes.items() if not route["client_state"]]
+            missing = [
+                name
+                for name, route in self._routes.items()
+                if not route["client_state"]
+            ]
             if missing:
                 logger.error(
                     "[msgraph_webhook] Refusing to start: route(s) %s missing client_state",
@@ -274,15 +284,13 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
-        return web.json_response(
-            {
-                "status": "ok",
-                "platform": self.platform.value,
-                "webhook_path": self._webhook_path,
-                "accepted": self._accepted_count,
-                "duplicates": self._duplicate_count,
-            }
-        )
+        return web.json_response({
+            "status": "ok",
+            "platform": self.platform.value,
+            "webhook_path": self._webhook_path,
+            "accepted": self._accepted_count,
+            "duplicates": self._duplicate_count,
+        })
 
     async def _handle_validation(self, request: "web.Request") -> "web.Response":
         """Handle Microsoft Graph subscription validation handshake.
@@ -356,7 +364,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 other_rejected += 1
                 continue
             notification = dict(raw_notification)
-            if not self._resource_accepted(str(notification.get("resource") or ""), route):
+            if not self._resource_accepted(
+                str(notification.get("resource") or ""), route
+            ):
                 other_rejected += 1
                 continue
             if not self._verify_client_state(notification, route):
@@ -412,8 +422,12 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             return False
         return any(peer_addr in network for network in self._allowed_source_networks)
 
-    def _resource_accepted(self, resource: str, route: Optional[Dict[str, Any]] = None) -> bool:
-        accepted = (route or {}).get("accepted_resources") if route is not None else None
+    def _resource_accepted(
+        self, resource: str, route: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        accepted = (
+            (route or {}).get("accepted_resources") if route is not None else None
+        )
         if accepted is None:
             accepted = self._accepted_resources
         if not accepted:
@@ -425,7 +439,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 continue
             if normalized_pattern.endswith("*"):
                 prefix = normalized_pattern[:-1].rstrip("/")
-                if normalized_resource == prefix or normalized_resource.startswith(f"{prefix}/"):
+                if normalized_resource == prefix or normalized_resource.startswith(
+                    f"{prefix}/"
+                ):
                     return True
                 continue
             if (
@@ -464,7 +480,9 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             "prompt": self._default_prompt,
         }
 
-    def _verify_client_state(self, notification: Dict[str, Any], route: Optional[Dict[str, Any]] = None) -> bool:
+    def _verify_client_state(
+        self, notification: Dict[str, Any], route: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """Verify the Graph-supplied clientState matches the configured secret.
 
         Uses ``hmac.compare_digest`` instead of ``==`` so that a mismatch
@@ -473,7 +491,11 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         the setup guide as "generate with ``openssl rand -hex 32``"), so a
         timing-safe compare is the right primitive.
         """
-        expected = (route or {}).get("client_state") if route is not None else self._client_state
+        expected = (
+            (route or {}).get("client_state")
+            if route is not None
+            else self._client_state
+        )
         if expected is None:
             # Fall back to the legacy flat field when the route didn't carry one
             # (covers the anonymous-default path in multi-route deployments
@@ -502,7 +524,10 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         receipt_key: Optional[str],
         route: Optional[Dict[str, Any]] = None,
     ) -> MessageEvent:
-        message_id = receipt_key or f"sha1:{sha1(json.dumps(notification, sort_keys=True).encode('utf-8')).hexdigest()}"
+        message_id = (
+            receipt_key
+            or f"sha1:{sha1(json.dumps(notification, sort_keys=True).encode('utf-8')).hexdigest()}"
+        )
         template = (route or {}).get("chat_id_template") or DEFAULT_CHAT_ID_TEMPLATE
         # Flatten notification fields into str.format kwargs. Graph notifications
         # are JSON objects; str.format only accepts str/int/float values, so coerce
@@ -537,17 +562,29 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             internal=True,
         )
 
-    def _render_prompt(self, notification: Dict[str, Any], route: Optional[Dict[str, Any]] = None) -> str:
+    def _render_prompt(
+        self, notification: Dict[str, Any], route: Optional[Dict[str, Any]] = None
+    ) -> str:
         # Per-route prompt wins, then the legacy flat ``prompt`` field, so an
         # existing single-tenant ``prompt:`` config keeps rendering unchanged.
         template = (route or {}).get("prompt") or self.config.extra.get("prompt", "")
         if template:
+            # Snake_case convenience aliases first, then the Graph-native
+            # camelCase field names (changeType, subscriptionId, ...) merged
+            # on top so a template can reference fields exactly as they
+            # appear in the Graph payload — e.g. ``{changeType}`` resolves
+            # instead of leaking through as a literal. This mirrors
+            # chat_id_template, which already flattens raw notification
+            # fields for str.format.
             payload = {
                 "notification": notification,
                 "resource": notification.get("resource", ""),
                 "change_type": notification.get("changeType", ""),
                 "subscription_id": notification.get("subscriptionId", ""),
             }
+            for key, value in notification.items():
+                if isinstance(value, (str, int, float)) and key not in payload:
+                    payload[key] = value
             return self._render_template(template, payload)
         rendered = json.dumps(notification, indent=2, sort_keys=True)[:4000]
         return f"Microsoft Graph change notification:\n\n```json\n{rendered}\n```"
