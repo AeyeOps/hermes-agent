@@ -82,7 +82,7 @@ export function ModelSettingsSkeleton() {
 
 // Hermes' reasoning levels (VALID_REASONING_EFFORTS); `none` = thinking off.
 // Empty config = Hermes default (medium), shown as Medium.
-const EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const
+const EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 // agent.service_tier stores "fast"/"priority"/"on" for fast; anything else is
 // normal (mirrors tui_gateway _load_service_tier).
@@ -93,8 +93,10 @@ const isFastTier = (tier: unknown): boolean =>
       .toLowerCase()
   )
 
-// Reuse the composer's effort labels (`xhigh` shows as "Max", else 1:1).
-const effortLabelKey = (v: string) => (v === 'xhigh' ? 'max' : v) as 'high' | 'low' | 'max' | 'medium' | 'minimal'
+// Labels 1:1 with values (xhigh is not max). `none` has no i18n key —
+// callers must render Off separately (m.reasoningOff).
+type EffortLabelKey = Exclude<(typeof EFFORT_VALUES)[number], 'none'>
+const effortLabelKey = (v: EffortLabelKey): EffortLabelKey => v
 
 // A provider row is "ready" to pick a model from when it reports models. The
 // backend now surfaces the full `hermes model` universe (every canonical
@@ -690,7 +692,9 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                   <SelectContent>
                     {EFFORT_VALUES.map(value => (
                       <SelectItem key={value} value={value}>
-                        {value === 'none' ? m.reasoningOff : t.shell.modelOptions[effortLabelKey(value)]}
+                        {value === 'none'
+                          ? m.reasoningOff
+                          : t.shell.modelOptions[effortLabelKey(value)]}
                       </SelectItem>
                     ))}
                   </SelectContent>

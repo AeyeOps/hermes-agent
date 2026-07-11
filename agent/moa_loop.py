@@ -426,6 +426,28 @@ def _render_tool_calls(tool_calls: Any) -> str:
     return "\n".join(lines)
 
 
+def _message_content_text(content: Any) -> str:
+    """Extract plain text from OpenAI-style message content.
+
+    The main agent may decorate text with cache-control by sending ``content``
+    as a list of text parts instead of a bare string. MoA references still need
+    the underlying text; non-text parts are ignored.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    return ""
+
+
 _ADVISORY_INSTRUCTION = (
     "[The conversation above is the current state of the task. Give your "
     "most intelligent judgement: what is going on, what should happen next, "
@@ -470,7 +492,7 @@ def _reference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
-        text = content if isinstance(content, str) else ""
+        text = _message_content_text(content)
 
         if role == "system":
             continue

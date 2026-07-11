@@ -76,10 +76,28 @@ def _resolve_custom_provider_input(raw: str) -> str | None:
 
 def _normalize_provider(provider: str) -> str:
     normalized = (provider or "").strip().lower()
+    if not normalized:
+        return normalized
+    if normalized.startswith(CUSTOM_POOL_PREFIX):
+        return normalized
     if normalized in {"or", "open-router"}:
         return "openrouter"
+    if normalized in {"codex", "openai_codex"}:
+        return "openai-codex"
     if normalized in {"grok-oauth", "xai-oauth", "x-ai-oauth", "xai-grok-oauth"}:
         return "xai-oauth"
+    # Built-in providers must win over user-defined provider rows with the same
+    # name.  A config block like ``providers.openai-codex`` is valid for model
+    # metadata, but it must not make auth commands resolve the canonical Codex
+    # provider as ``custom:openai-codex``.
+    slug = normalized.replace("_", "-").replace(" ", "-")
+    if normalized in PROVIDER_REGISTRY or normalized == "openrouter":
+        return normalized
+    if slug in PROVIDER_REGISTRY or slug == "openrouter":
+        return slug
+    for provider_id, config in PROVIDER_REGISTRY.items():
+        if _normalize_custom_pool_name(config.name) == slug:
+            return provider_id
     # Check if it matches a custom provider name
     custom_key = _resolve_custom_provider_input(normalized)
     if custom_key:

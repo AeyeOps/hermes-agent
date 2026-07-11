@@ -7174,18 +7174,22 @@ def _xai_oauth_poll_device_token(
     deadline = time.monotonic() + max(1, int(expires_in))
     current_interval = max(1, int(poll_interval))
     while time.monotonic() < deadline:
-        response = client.post(
-            token_endpoint,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
-            data={
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "client_id": XAI_OAUTH_CLIENT_ID,
-                "device_code": device_code,
-            },
-        )
+        try:
+            response = client.post(
+                token_endpoint,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "client_id": XAI_OAUTH_CLIENT_ID,
+                    "device_code": device_code,
+                },
+            )
+        except httpx.TransportError:
+            time.sleep(current_interval)
+            continue
         if response.status_code == 200:
             payload = response.json()
             if not payload.get("access_token"):

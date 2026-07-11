@@ -69,6 +69,32 @@ def _clear_provider_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+def test_normalize_provider_prefers_builtin_over_provider_config_collision(tmp_path, monkeypatch):
+    """A providers.openai-codex row must not shadow the built-in Codex provider."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "providers": {
+                    "openai-codex": {
+                        "api": "https://chatgpt.com/backend-api/codex",
+                        "api_mode": "codex_responses",
+                        "models": {"gpt-5.5": {"context_length": 272000}},
+                    }
+                }
+            }
+        )
+    )
+
+    from hermes_cli.auth_commands import _normalize_provider
+
+    assert _normalize_provider("openai-codex") == "openai-codex"
+    assert _normalize_provider("OpenAI Codex") == "openai-codex"
+    assert _normalize_provider("codex") == "openai-codex"
+
+
 def test_auth_add_api_key_persists_manual_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

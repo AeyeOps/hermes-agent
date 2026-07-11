@@ -335,6 +335,16 @@ class TestConfig:
         p = provider_with_config(recall_types=[])
         assert p._recall_types == ["observation"]
 
+    def test_recall_tags_scalar_string_normalized(self, provider_with_config):
+        """A scalar string recall_tags must normalize to a list (regression:
+        raw strings were passed straight to RecallRequest which rejects them)."""
+        p = provider_with_config(recall_tags="hermes")
+        assert p._recall_tags == ["hermes"]
+
+    def test_recall_tags_csv_string_normalized(self, provider_with_config):
+        p = provider_with_config(recall_tags="hermes, work, hermes")
+        assert p._recall_tags == ["hermes", "work"]
+
     def test_observation_scopes_keyword_config(self, provider_with_config):
         p = provider_with_config(observation_scopes="per_tag")
         assert p._observation_scopes == "per_tag"

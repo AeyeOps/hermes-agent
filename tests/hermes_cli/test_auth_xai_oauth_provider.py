@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from hermes_cli.auth import (
@@ -240,7 +241,7 @@ def test_xai_oauth_poll_device_token_waits_until_authorized(monkeypatch):
     client = _SequenceClient()
 
     payload = _xai_oauth_poll_device_token(
-        client,
+        client,  # type: ignore[arg-type]
         token_endpoint="https://auth.x.ai/oauth2/token",
         device_code="device-code",
         expires_in=30,
@@ -250,6 +251,45 @@ def test_xai_oauth_poll_device_token_waits_until_authorized(monkeypatch):
     assert payload["access_token"] == "xai-access"
     assert len(client.calls) == 2
     assert client.calls[0][1]["data"]["grant_type"] == "urn:ietf:params:oauth:grant-type:device_code"
+
+
+def test_xai_oauth_poll_device_token_retries_transient_transport_errors(monkeypatch):
+    class _SequenceClient:
+        def __init__(self):
+            self.calls = 0
+            self.responses = [
+                httpx.ConnectTimeout("temporary xAI timeout"),
+                _StubHTTPResponse(
+                    200,
+                    {
+                        "access_token": "xai-access",
+                        "refresh_token": "xai-refresh",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                    },
+                ),
+            ]
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    monkeypatch.setattr("hermes_cli.auth.time.sleep", lambda _: None)
+    client = _SequenceClient()
+
+    payload = _xai_oauth_poll_device_token(
+        client,  # type: ignore[arg-type]
+        token_endpoint="https://auth.x.ai/oauth2/token",
+        device_code="device-code",
+        expires_in=30,
+        poll_interval=1,
+    )
+
+    assert payload["access_token"] == "xai-access"
+    assert client.calls == 2
 
 
 # ---------------------------------------------------------------------------

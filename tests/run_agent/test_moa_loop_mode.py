@@ -392,6 +392,36 @@ def test_reference_messages_fresh_user_turn_ends_on_that_user():
     assert view[-1] == {"role": "user", "content": "q2 current"}
 
 
+def test_reference_messages_preserves_structured_text_parts():
+    """MoA references must see cache-control-decorated text parts.
+
+    The normal agent loop may send user/system content as OpenAI-style content
+    parts so it can attach provider cache-control metadata. Reference trimming
+    still needs the actual text; otherwise advisors receive an empty user turn
+    and strict endpoints reject the request as a malformed/missing prompt.
+    """
+    from agent.moa_loop import _reference_messages
+
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "q2 current", "cache_control": {"type": "ephemeral"}}
+            ],
+        },
+    ]
+
+    view = _reference_messages(messages)
+
+    assert view[-1] == {"role": "user", "content": "q2 current"}
+
+
 def test_run_reference_prepends_advisory_system_prompt(monkeypatch):
     """Each reference call gets the advisory-role system prompt first.
 
